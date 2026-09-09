@@ -42,21 +42,23 @@ type PaymentIntent struct {
 
 // ChainTransfer records scanned on-chain token transfer transactions
 type ChainTransfer struct {
-	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	TxHash         string    `gorm:"uniqueIndex;size:128;not null" json:"txHash"`
-	Chain          Chain     `gorm:"size:32;not null" json:"chain"`
-	Token          Token     `gorm:"size:32;not null" json:"token"`
-	Contract       string    `gorm:"size:128;not null;index" json:"contract"` // 新增合约地址
-	FromAddress    string    `gorm:"size:128;not null" json:"from"`
-	TargetAddress  string    `gorm:"size:128;not null;index" json:"targetAddress"` // 对齐 TargetAddress
-	Amount         float64   `gorm:"type:decimal(24,8);not null" json:"amount"`
+	ID            uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	TxHash        string `gorm:"uniqueIndex;size:128;not null" json:"txHash"`
+	Chain         Chain  `gorm:"size:32;not null" json:"chain"`
+	Token         Token  `gorm:"size:32;not null" json:"token"`
+	Contract      string `gorm:"size:128;not null;index" json:"contract"` // 新增合约地址
+	FromAddress   string `gorm:"size:128;not null" json:"from"`
+	TargetAddress string `gorm:"size:128;not null;index" json:"targetAddress"` // 对齐 TargetAddress
+// 1. 业务可读金额：改用 string 或 shopspring/decimal，坚决不能用 float64（会丢分度）
+	Amount         string    `gorm:"type:varchar(64);not null" json:"amount"`
 	BlockNumber    uint64    `gorm:"not null" json:"blockNumber"`
 	BlockTimestamp int64     `gorm:"not null" json:"blockTimestamp"`
 	MatchedOrderID string    `gorm:"size:128" json:"matchedOrderId,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
-	Value          *big.Int  `json:"value"`    // 原始链上精度大数 (Wei)
-	Decimals       uint8     `json:"decimals"` // 代币精度
-	Status         uint8     `json:"status"`   // 1: 成功, 2: 待最终确认 (用于大额充值二次校验)
+// 2. 原始链上精度数值：直接用字符串保存 16 进制转出的十进制无损大数
+	RawValue string `gorm:"type:varchar(78);not null" json:"rawValue"`
+	Decimals uint8  `json:"decimals"` // 代币精度
+	Status   uint8  `json:"status"`   // 1: 成功, 2: 待最终确认 (用于大额充值二次校验)
 }
 
 // WebhookLog records outgoing webhook delivery attempts and status
