@@ -1,0 +1,36 @@
+server_port: "8080"
+service_secret: "crypdog-secret-key-123456"
+webhook_secret: "crypdog-webhook-secret-987654"
+scan_interval_sec: 5
+
+database:
+  driver: "sqlite" # "sqlite" 或 "postgres"
+  dsn: "crypdog.db"
+
+# 针对各区块链节点的通信配置
+chains:
+  TRON:
+    rpc_url: "https://api.trongrid.io"
+    api_key: ""
+    confirmations: 19
+  BSC:
+    rpc_url: "https://binance.llamarpc.com"
+    confirmations: 15
+  ARBITRUM:
+    rpc_url: "https://arb1.arbitrum.io/rpc"
+    confirmations: 3
+  POLYGON:
+    rpc_url: "https://polygon-rpc.com"
+    confirmations: 128
+  SOLANA:
+    rpc_url: "https://api.mainnet-beta.solana.com"
+    confirmations: 32
+
+# 预设的收款钱包地址池（支持无限追加）
+initial_wallets:
+  - chain: "TRON"
+    address: "T9yD14Nj9j7xXv8YmZP2K8qL4W9vR1e3S4"
+    label: "Tron Hot Wallet 01"
+  - chain: "BSC"
+    address: "0x71C83664204CB356015E178d721978E2b0C8976F"
+    label: "BSC Hot Wallet 01"

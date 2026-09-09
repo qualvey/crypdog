@@ -1,0 +1,5 @@
+config.yaml
+*.db
+*.exe
+/demo
+/dist
