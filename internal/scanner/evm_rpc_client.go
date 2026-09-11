@@ -28,7 +28,7 @@ func NewEvmRPCClient(rpcURL string) *EvmRPCClient {
 }
 
 type rpcRequest struct {
-	Jsonrpc string        `json:"jsonrpc"`
+	JSONRPC string        `json:"jsonrpc"`
 	Method  string        `json:"method"`
 	Params  []interface{} `json:"params"`
 	ID      int           `json:"id"`
@@ -48,12 +48,14 @@ type EVMLog struct {
 	Address          string   `json:"address"`
 	Topics           []string `json:"topics"`
 	Data             string   `json:"data"`
-	BlockNumber      string   `json:"blockNumber"`
 	TransactionHash  string   `json:"transactionHash"`
 	TransactionIndex string   `json:"transactionIndex"`
-	BlockHash        string   `json:"blockHash"`
-	LogIndex         string   `json:"logIndex"`
-	Removed          bool     `json:"removed"`
+	// RPC 返回的原始 0x 十六进制字符串
+	BlockNumberHex string `json:"blockNumber"`
+	LogIndexHex    string `json:"logIndex"`
+	BlockNumber    uint64 `json:"-"`
+	LogIndex       int64  `json:"-"`
+	Removed        bool   `json:"removed"`
 }
 
 type EVMTransferEvent struct {
@@ -65,130 +67,114 @@ type EVMTransferEvent struct {
 	BlockNumber     int64
 }
 
-// GetLatestBlockNumber calls eth_blockNumber
-func (c *EvmRPCClient) GetLatestBlockNumber(ctx context.Context) (int64, error) {
-	reqBody := rpcRequest{
-		Jsonrpc: "2.0",
+// 1. evm_rpc_client.go 中：统一提供高效的 GetLatestBlockNumber
+func (c *EvmRPCClient) GetLatestBlockNumber(ctx context.Context) (uint64, error) {
+	raw, err := c.doRPC(ctx, rpcRequest{
+		JSONRPC: "2.0",
 		Method:  "eth_blockNumber",
 		Params:  []interface{}{},
 		ID:      1,
-	}
-
-	rawResult, err := c.doRPC(ctx, reqBody)
+	})
 	if err != nil {
 		return 0, err
 	}
 
-	var hexStr string
-	if err := json.Unmarshal(rawResult, &hexStr); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal blockNumber: %w", err)
+	var hexBlock string
+	if err := json.Unmarshal(raw, &hexBlock); err != nil {
+		return 0, fmt.Errorf("unmarshal block hex failed: %w", err)
 	}
 
-	cleanHex := strings.TrimPrefix(hexStr, "0x")
-	num, err := strconv.ParseInt(cleanHex, 16, 64)
+	cleanHex := strings.TrimPrefix(strings.ToLower(hexBlock), "0x")
+	num, err := strconv.ParseUint(cleanHex, 16, 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse hex blockNumber %s: %w", hexStr, err)
+		return 0, fmt.Errorf("parse hex (%s) to uint64 failed: %w", hexBlock, err)
 	}
-
 	return num, nil
 }
 
-// GetERC20Transfers calls eth_getLogs for ERC20 Transfer events to the target address
-func (c *EvmRPCClient) GetERC20Transfers(ctx context.Context, targetAddress string, fromBlock, toBlock int64) ([]EVMTransferEvent, error) {
-	// ERC20 Transfer topic
+// GetERC20Logs 通用的 ERC20 Transfer 事件拉取
+func (c *EvmRPCClient) GetERC20Logs(ctx context.Context, fromBlock, toBlock uint64, targetAddresses ...string) ([]EVMLog, error) {
 	transferSig := "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-
-	// Format targetAddress as 32-byte topic (pad with zeroes on left)
-	cleanAddr := strings.ToLower(strings.TrimPrefix(targetAddress, "0x"))
-	if len(cleanAddr) != 40 {
-		return nil, fmt.Errorf("invalid ethereum address length: %s", targetAddress)
-	}
-	topicTo := "0x000000000000000000000000" + cleanAddr
 
 	filter := map[string]interface{}{
 		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
 		"toBlock":   fmt.Sprintf("0x%x", toBlock),
-		"topics": []interface{}{
-			transferSig,
-			nil, // any sender
-			topicTo,
-		},
 	}
 
-	reqBody := rpcRequest{
-		Jsonrpc: "2.0",
+	if len(targetAddresses) == 0 {
+		// 监听该区块内所有的 Transfer 事件
+		filter["topics"] = []interface{}{transferSig}
+	} else {
+		// 精准过滤：利用以太坊 RPC 支持的数组模式匹配多个收款地址
+		topicsTo := make([]string, 0, len(targetAddresses))
+		for _, addr := range targetAddresses {
+			clean := strings.ToLower(strings.TrimPrefix(addr, "0x"))
+			if len(clean) == 40 {
+				topicsTo = append(topicsTo, "0x000000000000000000000000"+clean)
+			}
+		}
+		filter["topics"] = []interface{}{transferSig, nil, topicsTo}
+	}
+
+	raw, err := c.doRPC(ctx, rpcRequest{
+		JSONRPC: "2.0",
 		Method:  "eth_getLogs",
 		Params:  []interface{}{filter},
 		ID:      2,
-	}
-
-	rawResult, err := c.doRPC(ctx, reqBody)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	var logs []EVMLog
-	if err := json.Unmarshal(rawResult, &logs); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal eth_getLogs: %w", err)
+	if err := json.Unmarshal(raw, &logs); err != nil {
+		return nil, fmt.Errorf("unmarshal eth_getLogs failed: %w", err)
 	}
 
-	var events []EVMTransferEvent
-	for _, l := range logs {
-		if l.Removed || len(l.Topics) < 3 {
-			continue
-		}
-
-		from := "0x" + strings.TrimPrefix(l.Topics[1], "0x000000000000000000000000")
-		to := "0x" + strings.TrimPrefix(l.Topics[2], "0x000000000000000000000000")
-
-		dataClean := strings.TrimPrefix(l.Data, "0x")
-		if dataClean == "" {
-			continue
-		}
-
-		rawVal := new(big.Int)
-		rawVal.SetString(dataClean, 16)
-
-		blkClean := strings.TrimPrefix(l.BlockNumber, "0x")
-		blkNum, _ := strconv.ParseInt(blkClean, 16, 64)
-
-		events = append(events, EVMTransferEvent{
-			TxHash:          l.TransactionHash,
-			FromAddress:     strings.ToLower(from),
-			ToAddress:       strings.ToLower(to),
-			ContractAddress: strings.ToLower(l.Address),
-			RawValue:        rawVal,
-			BlockNumber:     blkNum,
-		})
+	// 统一在底层完成十六进制 blockNumber 解析
+	for i := range logs {
+		// 1. 解析 BlockNumber (uint64)
+		cleanBlock := strings.TrimPrefix(strings.ToLower(logs[i].BlockNumberHex), "0x")
+		logs[i].BlockNumber, _ = strconv.ParseUint(cleanBlock, 16, 64)
+		// 2. 解析 LogIndex (int64)
+		cleanLogIdx := strings.TrimPrefix(strings.ToLower(logs[i].LogIndexHex), "0x")
+		logs[i].LogIndex, _ = strconv.ParseInt(cleanLogIdx, 16, 64)
 	}
 
-	return events, nil
+	return logs, nil
 }
 
 func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMessage, error) {
 	jsonBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal rpc request failed: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.rpcURL, bytes.NewBuffer(jsonBytes))
+	// 1. 使用 bytes.NewReader，避免内存额外拷贝
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.rpcURL, bytes.NewReader(jsonBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create http request failed: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "CrypDog/1.0")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("execute rpc failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read response body failed: %w", err)
 	}
 
+	// 2. 融入 callRPC 的优点：先校验 HTTP 状态码（拦截反代 401/403/502 等非 200 情况）
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rpc node returned http %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	// 3. 保持 doRPC 的优点：解析并校验 JSON-RPC 2.0 规范的业务 error
 	var rpcResp rpcResponse
 	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
 		return nil, fmt.Errorf("invalid json-rpc response: %s", string(respBytes))
@@ -198,5 +184,6 @@ func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMess
 		return nil, fmt.Errorf("rpc error (code %d): %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 
+	// 4. 直接解包返回干净的 Result
 	return rpcResp.Result, nil
 }

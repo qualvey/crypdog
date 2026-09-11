@@ -6,23 +6,40 @@ scan_interval_sec: 5
 database:
   driver: "sqlite" # "sqlite" 或 "postgres"
   dsn: "crypdog.db"
+log:
+  level: "info"       # "debug" | "info" | "warn" | "error"
+  format: "text"      # "text" 或 "json"
+  output: "stdout"    # "stdout" 或 "file"
+  file_path: ""       # 日志落盘路径
+
+metrics:
+  enabled: true
+  path: "/metrics"
+
+pprof:
+  enabled: false
 
 # 针对各区块链节点的通信配置
 chains:
   TRON:
+    driver: "tron"
     rpc_url: "https://api.trongrid.io"
     api_key: ""
     confirmations: 19
   BSC:
+    driver: "evm"
     rpc_url: "https://binance.llamarpc.com"
     confirmations: 15
   ARBITRUM:
+    driver: "evm"
     rpc_url: "https://arb1.arbitrum.io/rpc"
     confirmations: 3
   POLYGON:
+    driver: "evm"
     rpc_url: "https://polygon-rpc.com"
     confirmations: 128
   SOLANA:
+    driver: "solana"
     rpc_url: "https://api.mainnet-beta.solana.com"
     confirmations: 32
 

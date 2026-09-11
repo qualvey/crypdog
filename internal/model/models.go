@@ -1,7 +1,6 @@
 package model
 
 import (
-	"math/big"
 	"strings"
 	"time"
 
@@ -21,44 +20,47 @@ const (
 
 // PaymentIntent represents a registered payment monitoring task
 type PaymentIntent struct {
-	ID             string       `gorm:"primaryKey;size:64" json:"intentId"`
-	OrderID        string       `gorm:"uniqueIndex;size:128;not null" json:"orderId"`
-	Chain          Chain        `gorm:"size:32;not null" json:"chain"`
-	Token          Token        `gorm:"size:32;not null" json:"token"`
-	TargetAddress  string       `gorm:"size:128;not null;index" json:"targetAddress"`
-	ExpectedAmount float64      `gorm:"type:decimal(24,8);not null" json:"expectedAmount"`
-	ReceivedAmount float64      `gorm:"type:decimal(24,8);default:0" json:"receivedAmount"`
-	TimeoutSeconds int          `gorm:"not null" json:"timeoutSeconds"`
-	WebhookURL     string       `gorm:"size:512;not null" json:"webhookUrl"`
-	Status         IntentStatus `gorm:"size:32;not null;default:'WATCHING';index" json:"status"`
-	TxHash         string       `gorm:"size:128" json:"txHash,omitempty"`
-	BlockNumber    int64        `gorm:"default:0" json:"blockNumber,omitempty"`
-	Confirmations  int          `gorm:"default:0" json:"confirmations,omitempty"`
-	ExpiresAt      time.Time    `gorm:"not null;index" json:"expiresAt"`
-	PaidAt         *time.Time   `json:"paidAt,omitempty"`
-	CreatedAt      time.Time    `json:"createdAt"`
-	UpdatedAt      time.Time    `json:"updatedAt"`
+	ID            string `gorm:"primaryKey;size:64" json:"intentId"`
+	OrderID       string `gorm:"uniqueIndex;size:128;not null" json:"orderId"`
+	TxHash        string `gorm:"size:128;index" json:"txHash,omitempty"`
+	Chain         Chain  `gorm:"size:32;not null;index:idx_collision,priority:3" json:"chain"`
+	LogIndex      int64  `gorm:"default:0" json:"logIndex,omitempty"`
+	Token         Token  `gorm:"size:32;not null;index:idx_collision,priority:4" json:"token"`
+	TargetAddress string `gorm:"size:128;not null;index:idx_collision,priority:1" json:"targetAddress"`
+	// 1. 金额改用定点数，与 DB 的 decimal(24,8) 完美对应，杜绝 float 误差
+	ExpectedAmount decimal.Decimal `gorm:"type:decimal(36,18);not null;index:idx_collision,priority:2" json:"expectedAmount"`
+	ReceivedAmount decimal.Decimal `gorm:"type:decimal(36,18);default:0" json:"receivedAmount"`
+	TimeoutSeconds int             `gorm:"not null;default:1800" json:"timeoutSeconds"`
+	WebhookURL     string          `gorm:"size:512;not null" json:"webhookUrl"`
+	Status         IntentStatus    `gorm:"size:32;not null;default:'WATCHING';index" json:"status"`
+	BlockNumber    uint64          `gorm:"default:0" json:"blockNumber,omitempty"`
+	Confirmations  uint64          `gorm:"default:0" json:"confirmations,omitempty"`
+	ExpiresAt      time.Time       `gorm:"not null;index" json:"expiresAt"`
+	PaidAt         *time.Time      `gorm:"index" json:"paidAt,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 // ChainTransfer records scanned on-chain token transfer transactions
 type ChainTransfer struct {
 	ID            uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	TxHash        string `gorm:"uniqueIndex;size:128;not null" json:"txHash"`
-	Chain         Chain  `gorm:"size:32;not null" json:"chain"`
+	TxHash        string `gorm:"size:128;not null;uniqueIndex:idx_chain_tx_log,priority:2" json:"txHash"`
+	Chain         Chain  `gorm:"size:32;not null;uniqueIndex:idx_chain_tx_log,priority:1" json:"chain"`
+	LogIndex      int64  `gorm:"not null;uniqueIndex:idx_chain_tx_log,priority:3" json:"logIndex"`
 	Token         Token  `gorm:"size:32;not null" json:"token"`
 	Contract      string `gorm:"size:128;not null;index" json:"contract"` // 新增合约地址
 	FromAddress   string `gorm:"size:128;not null" json:"from"`
 	TargetAddress string `gorm:"size:128;not null;index" json:"targetAddress"` // 对齐 TargetAddress
-// 1. 业务可读金额：改用 string 或 shopspring/decimal，坚决不能用 float64（会丢分度）
-	Amount         string    `gorm:"type:varchar(64);not null" json:"amount"`
+	// 1. 业务可读金额：改用 string 或 shopspring/decimal，坚决不能用 float64（会丢分度）
+	Amount decimal.Decimal `gorm:"type:varchar(64);not null" json:"amount"`
+	// 2. 原始链上精度数值：必须用字符串保存 16 进制转出的十进制无损大数
+	RawValue       string    `gorm:"type:varchar(78);not null" json:"rawValue"`
 	BlockNumber    uint64    `gorm:"not null" json:"blockNumber"`
 	BlockTimestamp int64     `gorm:"not null" json:"blockTimestamp"`
 	MatchedOrderID string    `gorm:"size:128" json:"matchedOrderId,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
-// 2. 原始链上精度数值：直接用字符串保存 16 进制转出的十进制无损大数
-	RawValue string `gorm:"type:varchar(78);not null" json:"rawValue"`
-	Decimals uint8  `json:"decimals"` // 代币精度
-	Status   uint8  `json:"status"`   // 1: 成功, 2: 待最终确认 (用于大额充值二次校验)
+	Decimals       uint8     `json:"decimals"` // 代币精度
+	Status         uint8     `json:"status"`   // 1: 成功, 2: 待最终确认 (用于大额充值二次校验)
 }
 
 // WebhookLog records outgoing webhook delivery attempts and status
@@ -255,4 +257,25 @@ func (c Chain) ToUpper() string {
 // ToUpper 封装大写转换，业务调用更干净
 func (t Token) ToUpper() string {
 	return strings.ToUpper(string(t))
+}
+
+// NewChainTransfer 统一构造入口：封装所有数据清洗规则与默认值
+func NewChainTransfer(
+	chain Chain,
+	txHash string,
+	logIndex int64,
+	contract string,
+	targetAddress string,
+	rawValue string,
+	blockNumber uint64,
+) ChainTransfer {
+	return ChainTransfer{
+		Chain:         chain,
+		TxHash:        strings.TrimSpace(txHash),
+		LogIndex:      logIndex,
+		Contract:      chain.NormalizeAddress(contract),
+		TargetAddress: chain.NormalizeAddress(targetAddress), // 自动纠正地址格式
+		RawValue:      rawValue,
+		BlockNumber:   blockNumber,
+	}
 }

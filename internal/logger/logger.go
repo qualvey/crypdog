@@ -2,6 +2,7 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -76,24 +77,57 @@ var (
 	std                          = log.New(defaultWriter, "", log.LstdFlags)
 	mu            sync.RWMutex
 	currentLevel  Level          = LevelInfo
+	currentFormat string         = "text"
 	slogLevelVar  *slog.LevelVar = new(slog.LevelVar)
 	logFileHandle *os.File
 )
 
+type contextKey string
+
+const RequestIDKey contextKey = "request_id"
+
+// WithRequestID 将 Request ID 注入 context
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, RequestIDKey, requestID)
+}
+
+// GetRequestID 从 context 获取 Request ID
+func GetRequestID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if val, ok := ctx.Value(RequestIDKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+func newSlogHandler(w io.Writer, format string) slog.Handler {
+	opts := &slog.HandlerOptions{
+		Level: slogLevelVar,
+	}
+	if strings.ToLower(strings.TrimSpace(format)) == "json" {
+		return slog.NewJSONHandler(w, opts)
+	}
+	return slog.NewTextHandler(w, opts)
+}
+
 func init() {
 	slogLevelVar.Set(slog.LevelInfo)
-	handler := slog.NewTextHandler(defaultWriter, &slog.HandlerOptions{
-		Level: slogLevelVar,
-	})
+	handler := newSlogHandler(defaultWriter, currentFormat)
 	slog.SetDefault(slog.New(handler))
 }
 
-// Init 初始化日志系统（设置日志级别与可选的文件落地）
-func Init(level string, output string, outfile string) {
+// Init 初始化日志系统（设置日志级别、格式及可选的文件落地）
+func Init(level string, format string, output string, outfile string) {
 	SetLevel(level)
 
 	mu.Lock()
 	defer mu.Unlock()
+
+	if format != "" {
+		currentFormat = strings.ToLower(strings.TrimSpace(format))
+	}
 
 	// 清理旧的文件句柄
 	if logFileHandle != nil {
@@ -134,9 +168,7 @@ func Init(level string, output string, outfile string) {
 	}
 
 	std.SetOutput(finalWriter)
-	handler := slog.NewTextHandler(finalWriter, &slog.HandlerOptions{
-		Level: slogLevelVar,
-	})
+	handler := newSlogHandler(finalWriter, currentFormat)
 	slog.SetDefault(slog.New(handler))
 }
 
@@ -209,13 +241,55 @@ func Fatalf(format string, args ...interface{}) {
 	Fatal(format, args...)
 }
 
+// InfoContext 输出带 Context (包含 request_id 等字段) 的结构化日志
+func InfoContext(ctx context.Context, msg string, args ...any) {
+	if !enabled(LevelInfo) {
+		return
+	}
+	if reqID := GetRequestID(ctx); reqID != "" {
+		args = append([]any{slog.String("request_id", reqID)}, args...)
+	}
+	slog.InfoContext(ctx, msg, args...)
+}
+
+// WarnContext 输出带 Context 的告警日志
+func WarnContext(ctx context.Context, msg string, args ...any) {
+	if !enabled(LevelWarn) {
+		return
+	}
+	if reqID := GetRequestID(ctx); reqID != "" {
+		args = append([]any{slog.String("request_id", reqID)}, args...)
+	}
+	slog.WarnContext(ctx, msg, args...)
+}
+
+// ErrorContext 输出带 Context 的错误日志
+func ErrorContext(ctx context.Context, msg string, args ...any) {
+	if !enabled(LevelError) {
+		return
+	}
+	if reqID := GetRequestID(ctx); reqID != "" {
+		args = append([]any{slog.String("request_id", reqID)}, args...)
+	}
+	slog.ErrorContext(ctx, msg, args...)
+}
+
+// DebugContext 输出带 Context 的调试日志
+func DebugContext(ctx context.Context, msg string, args ...any) {
+	if !enabled(LevelDebug) {
+		return
+	}
+	if reqID := GetRequestID(ctx); reqID != "" {
+		args = append([]any{slog.String("request_id", reqID)}, args...)
+	}
+	slog.DebugContext(ctx, msg, args...)
+}
+
 func SetOutput(w io.Writer) {
 	mu.Lock()
 	defer mu.Unlock()
 	std.SetOutput(w)
-	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level: slogLevelVar,
-	})
+	handler := newSlogHandler(w, currentFormat)
 	slog.SetDefault(slog.New(handler))
 }
 
@@ -227,8 +301,6 @@ func ResetOutput() {
 		logFileHandle = nil
 	}
 	std.SetOutput(defaultWriter)
-	handler := slog.NewTextHandler(defaultWriter, &slog.HandlerOptions{
-		Level: slogLevelVar,
-	})
+	handler := newSlogHandler(defaultWriter, currentFormat)
 	slog.SetDefault(slog.New(handler))
 }

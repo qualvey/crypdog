@@ -31,25 +31,7 @@ type BaseScanner struct {
 	latestBlock int64
 }
 
-// 2. 维护 Driver 与构造器的映射（可通过 Init 动态扩展）
-var scannerDrivers = map[string]ScannerFactory{
-	"evm": func(chain model.Chain, db *gorm.DB, cfg *config.Config) Scanner {
-		return NewEvmScanner(chain, db, cfg)
-	},
-	"tron": func(chain model.Chain, db *gorm.DB, cfg *config.Config) Scanner {
-		nodeCfg := cfg.Chains[chain]
-		return NewTronScanner(db, &nodeCfg)
-	},
-	"solana": func(chain model.Chain, db *gorm.DB, cfg *config.Config) Scanner {
-		nodeCfg := cfg.Chains[chain]
-		return NewSolanaScanner(db, &nodeCfg)
-	},
-}
 
-// RegisterDriver 方便未来在其他包直接注册新型链驱动（如 btc, sui 等）
-func RegisterDriver(driver string, factory ScannerFactory) {
-	scannerDrivers[driver] = factory
-}
 func NewBaseScanner(db *gorm.DB, cfg *config.Config, timeout time.Duration) BaseScanner {
 	return BaseScanner{
 		db:  db,
@@ -77,16 +59,22 @@ type Simulator interface {
 	SimulateTransfer(toAddress string, amount float64, token string, out chan<- model.ChainTransfer) string
 }
 type Manager struct {
-	scanners map[string]Scanner
-	mu       sync.RWMutex
+	scanners       map[string]Scanner
+	mu             sync.RWMutex
+	scannerDrivers map[string]ScannerFactory
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		scanners: make(map[string]Scanner),
+		scanners:       make(map[string]Scanner),
+		scannerDrivers: make(map[string]ScannerFactory),
 	}
 }
 
+// RegisterDriver 方便未来在其他包直接注册新型链驱动（如 btc, sui 等）
+func (m *Manager) RegisterDriver(chain string, factory ScannerFactory) {
+	m.scannerDrivers[chain] = factory
+}
 // Register 注册一个扫描器实例
 func (m *Manager) Register(s Scanner) {
 	m.mu.Lock()
@@ -102,9 +90,12 @@ func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) {
 			log.Printf("[Init] 跳过链扫描器: %s (已禁用或未配置 RPC)", chain)
 			continue
 		}
-		// 根据 Driver 查找对应的构造器
+		// 根据 Driver 查找对应的构造器，未配置时自动根据链类型推断默认驱动
 		driver := strings.ToLower(strings.TrimSpace(nodeCfg.Driver))
-		factory, exists := scannerDrivers[driver]
+		if driver == "" {
+			driver = inferDriverByChain(chain)
+		}
+		factory, exists := m.scannerDrivers[driver]
 		if !exists {
 			log.Printf("[Init] 跳过链扫描器: %s (不支持的驱动类型: %s)", chain, nodeCfg.Driver)
 			continue
@@ -112,7 +103,21 @@ func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) {
 
 		log.Printf("[Init] 注册链扫描器: %s [%s] (%s)", chain, driver, nodeCfg.RPCURL)
 		m.Register(factory(chain, db, cfg))
+	}
+}
 
+// inferDriverByChain 根据链标识推断默认底层驱动类型
+func inferDriverByChain(chain model.Chain) string {
+	c := strings.ToUpper(strings.TrimSpace(string(chain)))
+	switch c {
+	case "TRON", "TRC20":
+		return "tron"
+	case "SOLANA", "SOL":
+		return "solana"
+	case "ETH", "ETHEREUM", "BSC", "BINANCE", "POLYGON", "MATIC", "ARBITRUM", "ARB", "OPTIMISM", "BASE", "AVAX":
+		return "evm"
+	default:
+		return ""
 	}
 }
 
@@ -143,6 +148,18 @@ func (m *Manager) GetLatestBlock(chain model.Chain) uint64 {
 		return s.GetLatestBlock()
 	}
 	return 0
+}
+
+// GetScannersStatus 返回所有已注册扫描器的当前块高状态
+func (m *Manager) GetScannersStatus() map[string]uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	status := make(map[string]uint64)
+	for name, s := range m.scanners {
+		status[name] = s.GetLatestBlock()
+	}
+	return status
 }
 
 func (m *Manager) SimulateTransfer(chain string, toAddress string, amount float64, token string, out chan<- model.ChainTransfer) (string, error) {

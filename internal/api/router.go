@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 
 	"crypdog/internal/config"
@@ -14,6 +15,7 @@ import (
 	"crypdog/internal/signature"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
 )
 
@@ -48,13 +50,18 @@ func NewHandler(
 	}
 }
 func SetupRouter(h *Handler) *gin.Engine {
-	r := gin.Default()
+	r := gin.New()
+
+	// 统一注册可观测性与防御中间件
+	r.Use(StructuredRecoveryMiddleware())
+	r.Use(RequestIDMiddleware())
+	r.Use(AccessLogMiddleware())
 
 	// CORS Middleware
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		if c.Request.Method == "OPTIONS" {
@@ -67,13 +74,38 @@ func SetupRouter(h *Handler) *gin.Engine {
 	intentHandler := NewIntentHandler(h, intentService)
 	transferHandler := NewTransferHandler(h.db)
 
-	// Health Check Endpoint
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "UP",
-			"service": "CrypDog Crypto Payment Guardian",
-		})
-	})
+	// Health Check Endpoints (存活探针与深度就绪探针)
+	r.GET("/health", ReadyHandler(h))
+	r.GET("/healthz/live", LiveHandler)
+	r.GET("/healthz/ready", ReadyHandler(h))
+
+	// Prometheus Metrics Endpoint
+	if h.cfg.Metrics.Enabled {
+		metricsPath := h.cfg.Metrics.Path
+		if metricsPath == "" {
+			metricsPath = "/metrics"
+		}
+		r.GET(metricsPath, gin.WrapH(promhttp.Handler()))
+	}
+
+	// pprof Profiling 调试探针
+	if h.cfg.Pprof.Enabled {
+		pprofGroup := r.Group("/debug/pprof")
+		{
+			pprofGroup.GET("/", gin.WrapF(pprof.Index))
+			pprofGroup.GET("/cmdline", gin.WrapF(pprof.Cmdline))
+			pprofGroup.GET("/profile", gin.WrapF(pprof.Profile))
+			pprofGroup.POST("/symbol", gin.WrapF(pprof.Symbol))
+			pprofGroup.GET("/symbol", gin.WrapF(pprof.Symbol))
+			pprofGroup.GET("/trace", gin.WrapF(pprof.Trace))
+			pprofGroup.GET("/allocs", gin.WrapH(pprof.Handler("allocs")))
+			pprofGroup.GET("/block", gin.WrapH(pprof.Handler("block")))
+			pprofGroup.GET("/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+			pprofGroup.GET("/heap", gin.WrapH(pprof.Handler("heap")))
+			pprofGroup.GET("/mutex", gin.WrapH(pprof.Handler("mutex")))
+			pprofGroup.GET("/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
+		}
+	}
 
 	// Service Authorization Middleware
 	authMiddleware := func(c *gin.Context) {

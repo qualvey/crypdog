@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-type HeightProviderFunc func(chain model.Chain) int64
+type HeightProviderFunc func(chain model.Chain) uint64
 
 type ConfirmationWorker struct {
 	db             *gorm.DB
@@ -57,6 +58,7 @@ func (w *ConfirmationWorker) safeCheckConfirmations() {
 
 	w.checkConfirmations()
 }
+
 func (w *ConfirmationWorker) checkConfirmations() {
 	var confirmingIntents []model.PaymentIntent
 	err := w.db.Where("status = ? AND tx_hash != ''", model.StatusConfirming).Find(&confirmingIntents).Error
@@ -73,7 +75,7 @@ func (w *ConfirmationWorker) checkConfirmations() {
 			continue
 		}
 
-		confirmations := int(currentBlock - intent.BlockNumber + 1)
+		confirmations := currentBlock - intent.BlockNumber + 1
 		required := w.cfg.GetRequiredConfirmations(intent.Chain)
 
 		if confirmations >= required {
@@ -94,9 +96,14 @@ func (w *ConfirmationWorker) checkConfirmations() {
 
 			// Fetch transfer timestamp if available
 			var transfer model.ChainTransfer
-			var blockTs int64 = now.UnixMilli()
-			if err := w.db.Where("tx_hash = ?", intent.TxHash).First(&transfer).Error; err == nil {
-				blockTs = transfer.BlockTimestamp
+			var blockTs int64 = now.Unix()
+			if err := w.db.Where("chain = ? AND tx_hash = ? AND log_index = ?",intent.Chain,intent.TxHash,intent.LogIndex).First(&transfer).Error; err != nil {
+			    if !errors.Is(err, gorm.ErrRecordNotFound) {
+			        log.Printf("[ConfirmWorker] 查询关联流水失败 tx=%s: %v", intent.TxHash, err)
+			    }
+			    // 找不到才合理降级为 now
+			} else {
+			    blockTs = transfer.BlockTimestamp
 			}
 
 			// Trigger Webhook callback

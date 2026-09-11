@@ -1,29 +1,26 @@
 package scanner
 
 import (
-	"bytes"
 	"context"
 	"crypdog/internal/config"
 	"crypdog/internal/logger"
+	"crypdog/internal/metrics"
 	"crypdog/internal/model"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"math/big"
-	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type TokenMeta struct {
-	Symbol   string
+	Symbol   model.Token
 	Decimals int
 }
 
@@ -40,23 +37,23 @@ func parseAddressFromTopic(topic string) string {
 
 var knownTokens = map[string]map[string]TokenMeta{
 	"ARBITRUM": {
-		"0xaf88d065e77c8cc2239327c5edb3a432268e5831": {Symbol: "USDC", Decimals: 6}, // Native USDC
-		"0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": {Symbol: "USDC", Decimals: 6}, // Bridged USDC.e
-		"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": {Symbol: "USDT", Decimals: 6}, // USDT
+		"0xaf88d065e77c8cc2239327c5edb3a432268e5831": {Symbol: model.TokenUSDC, Decimals: 6}, // Native USDC
+		"0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": {Symbol: model.TokenUSDC, Decimals: 6}, // Bridged USDC.e
+		"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": {Symbol: model.TokenUSDT, Decimals: 6}, // USDT
 		"0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": {Symbol: "DAI", Decimals: 18},
 	},
 	"BSC": {
-		"0x55d398326f99059ff775485246999027b3197955": {Symbol: "USDT", Decimals: 18},
-		"0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": {Symbol: "USDC", Decimals: 18},
+		"0x55d398326f99059ff775485246999027b3197955": {Symbol: model.TokenUSDT, Decimals: 18},
+		"0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": {Symbol: model.TokenUSDC, Decimals: 18},
 		"0xe9e7cea3dedca5984780bafc599bd69add087d56": {Symbol: "BUSD", Decimals: 18},
 	},
 	"ETH": {
-		"0xdac17f958d2ee523a2206206994597c13d831ec7": {Symbol: "USDT", Decimals: 6},
-		"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {Symbol: "USDC", Decimals: 6},
+		"0xdac17f958d2ee523a2206206994597c13d831ec7": {Symbol: model.TokenUSDT, Decimals: 6},
+		"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {Symbol: model.TokenUSDC, Decimals: 6},
 	},
 	"POLYGON": {
-		"0xc2132d05d31c914a87c6611c10748aeb04b58e8f": {Symbol: "USDT", Decimals: 6},
-		"0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": {Symbol: "USDC", Decimals: 6},
+		"0xc2132d05d31c914a87c6611c10748aeb04b58e8f": {Symbol: model.TokenUSDT, Decimals: 6},
+		"0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": {Symbol: model.TokenUSDC, Decimals: 6},
 	},
 }
 
@@ -65,10 +62,10 @@ var knownTokens = map[string]map[string]TokenMeta{
 type EvmScanner struct {
 	chain            model.Chain // "BSC", "ARBITRUM", "POLYGON"
 	rpcURL           string
+	client           EvmRPCClient
 	db               *gorm.DB
 	lastScannedBlock uint64
 	cfg              *config.ChainNodeConfig
-	client           *http.Client
 	// 运行状态
 	latestBlock atomic.Uint64 // 当前全网高度
 	scannedSlot uint64        // 当前已确认落库的扫描进度 (单协程内维护无需 atomic)
@@ -79,52 +76,30 @@ type EvmScanner struct {
 	wallets map[string]struct{} // O(1) 匹配监控地址
 }
 
-// 标准 JSON-RPC 请求结构体
-type jsonRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-	ID      int           `json:"id"`
-}
-
-// 标准 JSON-RPC 响应结构体
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-// 对应 eth_getLogs 返回的单条日志结构
-type evmLogItem struct {
-	Address         string   `json:"address"`
-	Topics          []string `json:"topics"`
-	Data            string   `json:"data"`
-	BlockNumberHex  string   `json:"blockNumber"`
-	TransactionHash string   `json:"transactionHash"`
-	BlockNumber     uint64   `json:"-"` // 解析后填入
-}
-
 func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.Config) *EvmScanner {
+	var nodeCfg config.ChainNodeConfig
+	if cfg != nil {
+		nodeCfg = cfg.Chains[Chain]
+	}
 	return &EvmScanner{
-		chain:  Chain,
-		rpcURL: cfg.Chains[Chain].RPCURL,
+		chain:   Chain,
+		db:      db,
+		cfg:     &nodeCfg,
+		client:  *NewEvmRPCClient(nodeCfg.RPCURL),
+		wallets: make(map[string]struct{}),
 	}
 }
 func (s *EvmScanner) Chain() model.Chain {
 	return s.chain
 }
 func (s *EvmScanner) GetLatestBlock() uint64 {
-	return 888888888
+	return s.latestBlock.Load()
 }
 
 func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainTransfer) error {
-	interval := time.Duration(e.cfg.ScanIntervalSec) * time.Second
-	if interval <= 0 {
-		interval = 3 * time.Second // 默认兜底 3 秒
+	interval := 3 * time.Second
+	if e.cfg != nil && e.cfg.ScanIntervalSec > 0 {
+		interval = time.Duration(e.cfg.ScanIntervalSec) * time.Second
 	}
 	log.Printf("[%s Scanner] 启动 EVM 扫描守护协程 (扫描间隔: %v)", e.Chain(), interval)
 	// 1. 初始化游标：必须成功才能开启事件循环；网络抖动时做指数退避重试
@@ -166,7 +141,7 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 // initCursor 负责启动时确定安全的扫描起始高度
 func (e *EvmScanner) initCursor(ctx context.Context) error {
 	// A. 先获取当前链上最新高度，更新内存原子状态
-	latestOnChain, err := e.fetchLatestBlockNumber(ctx)
+	latestOnChain, err := e.client.GetLatestBlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("获取链上最新高度失败: %w", err)
 	}
@@ -224,11 +199,13 @@ func (e *EvmScanner) setLatestBlock(blk uint64) {
 
 // scanNextBlocks 核心步进扫块逻辑
 func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- model.ChainTransfer) error {
-	latestOnChain, err := e.fetchLatestBlockNumber(ctx)
+	latestOnChain, err := e.client.GetLatestBlockNumber(ctx)
 	if err != nil {
+		metrics.RecordScanError(string(e.Chain()), "evm")
 		return fmt.Errorf("获取最新区块高度失败: %w", err)
 	}
 	e.setLatestBlock(latestOnChain)
+	metrics.RecordScanBlock(string(e.Chain()), e.lastScannedBlock, latestOnChain)
 	// 1. 防分叉安全高度计算 (Safe Block)
 	blockDelay := uint64(5) // 默认 5 个确认数
 	if e.cfg.BlockDelay > 0 {
@@ -262,7 +239,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 		walletMap[strings.ToLower(w.Address)] = true
 	}
 	// 3. 查询此区间内的 ERC20 Transfer 日志
-	logs, err := e.getLogs(ctx, fromBlock, toBlock)
+	logs, err := e.client.GetERC20Logs(ctx, fromBlock, toBlock)
 	if err != nil {
 		return fmt.Errorf("拉取区块 [%d - %d] 日志失败: %w", fromBlock, toBlock, err)
 	}
@@ -289,20 +266,21 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			continue
 		}
 
-		transfer := model.ChainTransfer{
-			Chain:         e.chain,
-			TxHash:        l.TransactionHash,
-			Contract:      strings.ToLower(l.Address),
-			TargetAddress: targetAddress,
-			RawValue:      amountBig.String(),
-			BlockNumber:   l.BlockNumber,
-			CreatedAt:     time.Now(),
-		}
+		transfer := model.NewChainTransfer(
+			e.chain,
+			l.TransactionHash,
+			l.LogIndex,
+			l.Address,
+			targetAddress,
+			amountBig.String(),
+			l.BlockNumber,
+		)
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case transferChan <- transfer:
+			metrics.RecordTransferCaptured(string(e.Chain()), string(transfer.Token))
 			log.Printf("[%s Scanner] 捕获充值: Tx=%s, To=%s, RawAmount=%s, Block=%d",
 				e.Chain(), transfer.TxHash, transfer.TargetAddress, transfer.RawValue, transfer.BlockNumber)
 		}
@@ -314,16 +292,22 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 
 // commitProgress 原子持久化游标
 func (e *EvmScanner) commitProgress(ctx context.Context, toBlock uint64) error {
-	err := e.db.WithContext(ctx).
-		Model(&model.ScanProgress{}).
-		Where("chain = ?", e.Chain()).
-		Update("last_scanned_block", toBlock).Error
+	progress := model.ScanProgress{
+		Chain:            e.Chain(),
+		LastScannedBlock: toBlock,
+		UpdatedAt:        time.Now(),
+	}
+	err := e.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chain"}},
+		DoUpdates: clause.AssignmentColumns([]string{"last_scanned_block", "updated_at"}),
+	}).Create(&progress).Error
 
 	if err != nil {
 		return fmt.Errorf("持久化扫描游标失败: %w", err)
 	}
 
 	e.lastScannedBlock = toBlock
+	metrics.RecordScanBlock(string(e.Chain()), toBlock, e.latestBlock.Load())
 	return nil
 }
 func parseEvmAmount(rawValue *big.Int, decimals int) float64 {
@@ -365,102 +349,3 @@ func parseEvmAmount(rawValue *big.Int, decimals int) float64 {
 //		transferChan <- transfer
 //		return txHash
 //	}
-func (e *EvmScanner) fetchLatestBlockNumber(ctx context.Context) (uint64, error) {
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "eth_blockNumber",
-		Params:  []interface{}{},
-		ID:      1,
-	}
-
-	var resp jsonRPCResponse
-	if err := e.callRPC(ctx, reqBody, &resp); err != nil {
-		return 0, err
-	}
-
-	if resp.Error != nil {
-		return 0, fmt.Errorf("rpc error [%d]: %s", resp.Error.Code, resp.Error.Message)
-	}
-
-	var hexBlock string
-	if err := json.Unmarshal(resp.Result, &hexBlock); err != nil {
-		return 0, fmt.Errorf("decode blockNumber hex failed: %w", err)
-	}
-
-	// 将 0x 开头的十六进制解析为 uint64
-	cleanHex := strings.TrimPrefix(hexBlock, "0x")
-	blockNum, err := strconv.ParseUint(cleanHex, 16, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse hex blockNumber (%s) failed: %w", hexBlock, err)
-	}
-	logger.Info("latest block num %d", blockNum)
-
-	return blockNum, nil
-}
-
-// 2. 实现 getLogs: 调用 eth_getLogs
-func (e *EvmScanner) getLogs(ctx context.Context, fromBlock, toBlock uint64) ([]evmLogItem, error) {
-	filterParam := map[string]interface{}{
-		"fromBlock": fmt.Sprintf("0x%x", fromBlock),
-		"toBlock":   fmt.Sprintf("0x%x", toBlock),
-		"topics": []interface{}{
-			ERC20TransferTopic, // 仅监听 Transfer(address,address,uint256)
-		},
-	}
-
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "eth_getLogs",
-		Params:  []interface{}{filterParam},
-		ID:      2,
-	}
-
-	var resp jsonRPCResponse
-	if err := e.callRPC(ctx, reqBody, &resp); err != nil {
-		return nil, err
-	}
-
-	if resp.Error != nil {
-		return nil, fmt.Errorf("rpc error [%d]: %s", resp.Error.Code, resp.Error.Message)
-	}
-
-	var rawLogs []evmLogItem
-	if err := json.Unmarshal(resp.Result, &rawLogs); err != nil {
-		return nil, fmt.Errorf("decode getLogs result failed: %w", err)
-	}
-
-	for i := range rawLogs {
-		cleanHex := strings.TrimPrefix(rawLogs[i].BlockNumberHex, "0x")
-		rawLogs[i].BlockNumber, _ = strconv.ParseUint(cleanHex, 16, 64)
-	}
-
-	return rawLogs, nil
-}
-
-// 3. 通用 HTTP POST RPC 发送封装
-func (e *EvmScanner) callRPC(ctx context.Context, reqData interface{}, out interface{}) error {
-	payload, err := json.Marshal(reqData)
-	if err != nil {
-		return fmt.Errorf("marshal json-rpc request failed: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, e.rpcURL, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("create http request failed: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	// 复用嵌入在 BaseScanner 中的 client
-	resp, err := e.client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("execute http rpc request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("rpc node returned http %d: %s", resp.StatusCode, string(body))
-	}
-
-	return json.NewDecoder(resp.Body).Decode(out)
-}

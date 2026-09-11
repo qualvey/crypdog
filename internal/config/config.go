@@ -19,7 +19,7 @@ type ChainNodeConfig struct {
 
 	ScanIntervalSec int `yaml:"scan_interval_sec" env-default:"3"`
 	// 扫链核心参数（防丢单、防分叉）
-	Confirmations int    `yaml:"confirmations" env-default:"12"` // 确认块数
+	Confirmations uint64 `yaml:"confirmations" env-default:"12"` // 确认块数
 	BlockDelay    uint64 `yaml:"block_delay" env-default:"3"`    // 安全滞后扫描，防软分叉
 	BatchSize     uint64 `yaml:"batch_size" env-default:"10"`    // 单次批量获取块数
 	StartBlock    uint64 `yaml:"start_block"`                    // 首次启动若无记录从哪个块开始
@@ -46,12 +46,31 @@ type ServerConfig struct {
 	Secret string `yaml:"service_secret" env:"SERVICE_SECRET_KEY" env-default:"crypdog-secret-key-123456"`
 }
 type WebhookConfig struct {
-	Secret string `yaml:"webhook_secret" env:"SHARED_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
-	MaxRetries    int    `yaml:"max_retries" env-default:"3"`
-	TimeoutSec    int    `yaml:"timeout_sec" env-default:"5"`
+	Secret     string `yaml:"webhook_secret" env:"SHARED_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
+	MaxRetries int    `yaml:"max_retries" env-default:"3"`
+	TimeoutSec int    `yaml:"timeout_sec" env-default:"5"`
 }
 
 type MonitorConfig struct {
+}
+
+// LogConfig 日志配置
+type LogConfig struct {
+	Level    string `yaml:"level" env:"LOG_LEVEL" env-default:"info"`
+	Format   string `yaml:"format" env:"LOG_FORMAT" env-default:"text"`       // text 或 json
+	Output   string `yaml:"output" env:"LOG_OUTPUT" env-default:"stdout"`   // stdout 或 file
+	FilePath string `yaml:"file_path" env:"LOG_FILE_PATH"`                 // 文件路径，如 logs/crypdog.log
+}
+
+// MetricsConfig 指标暴露配置
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled" env:"METRICS_ENABLED" env-default:"true"`
+	Path    string `yaml:"path" env:"METRICS_PATH" env-default:"/metrics"`
+}
+
+// PprofConfig 性能探针配置
+type PprofConfig struct {
+	Enabled bool `yaml:"enabled" env:"PPROF_ENABLED" env-default:"false"`
 }
 
 // Config 根配置结构体
@@ -61,6 +80,9 @@ type Config struct {
 	Webhook         WebhookConfig  `yaml:"webhook"`
 	Database        DatabaseConfig `yaml:"database"`
 	Monitor         MonitorConfig  `yaml:"monitor"`
+	Log             LogConfig      `yaml:"log"`
+	Metrics         MetricsConfig  `yaml:"metrics"`
+	Pprof           PprofConfig    `yaml:"pprof"`
 	//全大写
 	Chains         map[model.Chain]ChainNodeConfig `yaml:"chains"`
 	InitialWallets []InitialWallet                 `yaml:"initial_wallets"`
@@ -91,7 +113,7 @@ func LoadConfig(configPath ...string) (*Config, error) {
 }
 
 // GetRequiredConfirmations 获取指定公链的安全确认数
-func (c *Config) GetRequiredConfirmations(chain model.Chain) int {
+func (c *Config) GetRequiredConfirmations(chain model.Chain) uint64 {
 	if nodeCfg, exists := c.Chains[chain]; exists && nodeCfg.Confirmations > 0 {
 		return nodeCfg.Confirmations
 	}

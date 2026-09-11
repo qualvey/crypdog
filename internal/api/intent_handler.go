@@ -5,13 +5,13 @@ import (
 	"crypdog/internal/service"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type IntentHandler struct {
@@ -20,12 +20,12 @@ type IntentHandler struct {
 }
 
 type AllocateIntentReq struct {
-	OrderID        string      `json:"orderId" binding:"required"`
-	Chain          model.Chain `json:"chain" binding:"required"`
-	Token          model.Token `json:"token" binding:"required"`
-	BaseAmount     float64     `json:"baseAmount" binding:"required"`
-	TimeoutSeconds int         `json:"timeoutSeconds" binding:"required"`
-	WebhookURL     string      `json:"webhookUrl" binding:"required"`
+	OrderID        string          `json:"orderId" binding:"required"`
+	Chain          model.Chain     `json:"chain" binding:"required"`
+	Token          model.Token     `json:"token" binding:"required"`
+	BaseAmount     decimal.Decimal `json:"baseAmount" binding:"required"`
+	TimeoutSeconds int             `json:"timeoutSeconds" binding:"required"`
+	WebhookURL     string          `json:"webhookUrl" binding:"required"`
 }
 
 func NewIntentHandler(h *Handler, i *service.IntentService) *IntentHandler {
@@ -46,13 +46,13 @@ func normalizeTimeout(sec int) int {
 }
 
 type RegisterIntentReq struct {
-	OrderID        string      `json:"orderId" binding:"required"`
-	Chain          model.Chain `json:"chain" binding:"required"`
-	Token          model.Token `json:"token" binding:"required"`
-	TargetAddress  string      `json:"targetAddress" binding:"required"`
-	ExpectedAmount float64     `json:"expectedAmount" binding:"required"`
-	TimeoutSeconds int         `json:"timeoutSeconds" binding:"required"`
-	WebhookURL     string      `json:"webhookUrl" binding:"required"`
+	OrderID        string          `json:"orderId" binding:"required"`
+	Chain          model.Chain     `json:"chain" binding:"required"`
+	Token          model.Token     `json:"token" binding:"required"`
+	TargetAddress  string          `json:"targetAddress" binding:"required"`
+	ExpectedAmount decimal.Decimal `json:"expectedAmount" binding:"required"`
+	TimeoutSeconds int             `json:"timeoutSeconds" binding:"required"`
+	WebhookURL     string          `json:"webhookUrl" binding:"required"`
 }
 
 // RegisterIntent handles POST /api/v1/watcher/intents
@@ -68,7 +68,7 @@ func (h *IntentHandler) RegisterIntent(c *gin.Context) {
 	// 基础参数兜底
 	dto := service.RegisterDTO{
 		OrderID:        strings.TrimSpace(req.OrderID),
-		Chain:          req.Chain,
+		Chain:          model.NormalizeChain(string(req.Chain)),
 		Token:          req.Token,
 		TargetAddress:  strings.TrimSpace(req.TargetAddress),
 		ExpectedAmount: req.ExpectedAmount,
@@ -137,7 +137,7 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		}
 
 		if existing.Status == model.StatusWatching || existing.Status == model.StatusConfirming {
-			tail := math.Round((existing.ExpectedAmount-req.BaseAmount)*1000000) / 1000000
+			tail := existing.ExpectedAmount.Sub(req.BaseAmount)
 			c.JSON(http.StatusOK, gin.H{
 				"code":    200,
 				"message": "Payment intent already active (Idempotent response)",
@@ -155,8 +155,10 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		}
 	}
 
+	normChain := model.NormalizeChain(string(req.Chain))
+
 	// 2. Allocate unique micro-amount
-	targetAddress, allocatedAmount, err := h.poolManager.AllocateUniqueAmount(model.Chain(req.Chain), model.Token(req.Token), req.BaseAmount)
+	targetAddress, allocatedAmount, err := h.poolManager.AllocateUniqueAmount(normChain, model.Token(req.Token), req.BaseAmount)
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{
 			"code":    409,
@@ -165,20 +167,21 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		return
 	}
 
-	tailOffset := math.Round((allocatedAmount-req.BaseAmount)*1000000) / 1000000
+	tailOffset := allocatedAmount.Sub(req.BaseAmount)
 
-	intentID := fmt.Sprintf("intent_%s_%s", req.Chain, uuid.New().String()[:8])
+	intentID := fmt.Sprintf("intent_%s_%s", normChain, uuid.New().String()[:8])
 	now := time.Now()
-	expiresAt := now.Add(time.Duration(req.TimeoutSeconds) * time.Second)
+	timeoutSec := normalizeTimeout(req.TimeoutSeconds)
+	expiresAt := now.Add(time.Duration(timeoutSec) * time.Second)
 
 	intent := model.PaymentIntent{
 		ID:             intentID,
 		OrderID:        req.OrderID,
-		Chain:          req.Chain,
+		Chain:          normChain,
 		Token:          req.Token,
 		TargetAddress:  targetAddress,
 		ExpectedAmount: allocatedAmount,
-		TimeoutSeconds: req.TimeoutSeconds,
+		TimeoutSeconds: timeoutSec,
 		WebhookURL:     req.WebhookURL,
 		Status:         model.StatusWatching,
 		ExpiresAt:      expiresAt,

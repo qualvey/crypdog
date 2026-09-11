@@ -9,22 +9,24 @@ import (
 	"time"
 
 	"crypdog/internal/config"
+	"crypdog/internal/metrics"
 	"crypdog/internal/model"
 	"crypdog/internal/signature"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
 type WebhookPayload struct {
-	Event          string      `json:"event"`
-	OrderID        string      `json:"orderId"`
-	Chain          model.Chain `json:"chain"`
-	Token          model.Token `json:"token"`
-	TargetAddress  string      `json:"targetAddress"`
-	Amount         float64     `json:"amount"`
-	TxHash         string      `json:"txHash"`
-	BlockTimestamp int64       `json:"blockTimestamp"`
-	Timestamp      string      `json:"timestamp"`
+	Event          string          `json:"event"`
+	OrderID        string          `json:"orderId"`
+	Chain          model.Chain     `json:"chain"`
+	Token          model.Token     `json:"token"`
+	TargetAddress  string          `json:"targetAddress"`
+	Amount         decimal.Decimal `json:"amount"`
+	TxHash         string          `json:"txHash"`
+	BlockTimestamp int64           `json:"blockTimestamp"`
+	Timestamp      string          `json:"timestamp"`
 }
 
 type WebhookDispatcher struct {
@@ -84,7 +86,9 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	log.Printf("[Webhook] Sending notification to %s (Order: %s, Attempt: %d)", webhookURL, orderID, attempt)
 
+	startTime := time.Now()
 	resp, err := w.client.Do(req)
+	durationSec := time.Since(startTime).Seconds()
 
 	webhookLog := model.WebhookLog{
 		OrderID:    orderID,
@@ -111,6 +115,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	w.db.Create(&webhookLog)
 
 	if success {
+		metrics.RecordWebhookDispatch("success", durationSec)
 		log.Printf("[Webhook] Successfully delivered webhook for Order: %s", orderID)
 		return
 	}
@@ -119,6 +124,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	// Retry logic (Exponential backoff: 2s, 10s, 30s, 2m)
 	if attempt < 5 {
+		metrics.RecordWebhookDispatch("retry", durationSec)
 		backoffDurations := []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute}
 		nextDelay := backoffDurations[attempt-1]
 
@@ -129,6 +135,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 			w.DeliverWithRetry(orderID, webhookURL, payload, attempt+1)
 		})
 	} else {
+		metrics.RecordWebhookDispatch("max_retried", durationSec)
 		log.Printf("[Webhook] Exceeded max retries for Order: %s", orderID)
 	}
 }

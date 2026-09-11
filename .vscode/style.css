@@ -1,0 +1,7 @@
+/* 解除 SVG 最大宽度 100% 的死限制，允许横向滚动并放大文字 */
+.mermaid svg {
+    max-width: none !important;
+    width: 2600px !important;
+    /* 强制拉伸宽度到 2600px，根据需要调整 */
+    height: auto !important;
+}

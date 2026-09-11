@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"crypdog/internal/config"
+	"crypdog/internal/metrics"
 	"crypdog/internal/model"
 	"encoding/json"
 	"fmt"
@@ -232,7 +233,7 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		if err != nil {
 			continue
 		}
-		amount := valDec.Div(decimal.New(1, decimals)).InexactFloat64()
+		amount := valDec.Div(decimal.New(1, decimals))
 
 		transfer := model.ChainTransfer{
 			TxHash:         tx.TransactionID,
@@ -248,12 +249,13 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		case <-ctx.Done():
 			return
 		case transferChan <- transfer:
+			metrics.RecordTransferCaptured(string(model.ChainTron), string(transfer.Token))
 		}
 	}
 }
 
 // SimulateTransfer 模拟触发一笔 TRC-20 充值事件（仅供本地开发联调、单测或 Webhook 验证）
-func (t *TronScanner) SimulateTransfer(ctx context.Context, toAddress string, amount float64, token model.Token, transferChan chan<- model.ChainTransfer) (string, error) {
+func (t *TronScanner) SimulateTransfer(ctx context.Context, toAddress string, amount decimal.Decimal, token model.Token, transferChan chan<- model.ChainTransfer) (string, error) {
 	if token == "" {
 		token = model.TokenUSDT
 	}
@@ -289,8 +291,8 @@ func (t *TronScanner) SimulateTransfer(ctx context.Context, toAddress string, am
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case transferChan <- transfer:
-		log.Printf("[TronScanner] [MOCK] 已模拟充值事件: TxHash=%s, To=%s, Amount=%.4f %s",
-			txHash, target, amount, token)
+		log.Printf("[TronScanner] [MOCK] 已模拟充值事件: TxHash=%s, To=%s, Amount=%s %s",
+			txHash, target, amount.StringFixed(4), token)
 		return txHash, nil
 	case <-time.After(3 * time.Second):
 		return "", fmt.Errorf("推送模拟事件超时，transferChan 已满")
