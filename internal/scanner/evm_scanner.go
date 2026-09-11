@@ -117,9 +117,15 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 		}
 		break // 初始化成功，跳出重试
 	}
-	// 3. 立即执行首次扫描（不用干等第一个周期触发）
-	if err := e.scanNextBlocks(ctx, transferChan); err != nil {
-		log.Printf("[%s Scanner] 首次扫块异常: %v", e.Chain(), err)
+	// 3. 立即执行首次扫描并快速追平历史落后块
+	for {
+		if err := e.scanNextBlocks(ctx, transferChan); err != nil {
+			log.Printf("[%s Scanner] 首次扫块异常: %v", e.Chain(), err)
+			break
+		}
+		if e.lastScannedBlock+5 >= e.latestBlock.Load() || ctx.Err() != nil {
+			break
+		}
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop() // 1. 退出时清理 Ticker，避免内存泄漏
@@ -132,9 +138,15 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 			return ctx.Err()
 
 		case <-ticker.C:
-			// 周期性触发下批次区块扫描
-			if err := e.scanNextBlocks(ctx, transferChan); err != nil {
-				log.Printf("[%s Scanner] 扫块异常: %v", e.Chain(), err)
+			// 周期性触发扫块；若滞后则快速连续追赶
+			for {
+				if err := e.scanNextBlocks(ctx, transferChan); err != nil {
+					log.Printf("[%s Scanner] 扫块异常: %v", e.Chain(), err)
+					break
+				}
+				if e.lastScannedBlock+5 >= e.latestBlock.Load() || ctx.Err() != nil {
+					break
+				}
 			}
 		}
 	}
@@ -219,29 +231,36 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 		return nil
 	}
 	fromBlock := e.lastScannedBlock + 1
-	batchSize := uint64(20)
+
+	// 2. 查出当前正在等待收款的钱包地址（用于内存过滤与服务端 Topic 过滤）
+	var activeWallets []model.WalletAddress
+	_ = e.db.Where("UPPER(chain) = ? AND enabled = ?", e.Chain(), true).Find(&activeWallets).Error
+	if len(activeWallets) == 0 {
+		// 没有待监听地址，直接大步推进游标落库
+		toBlock := fromBlock + 500 - 1
+		if toBlock > safeBlock {
+			toBlock = safeBlock
+		}
+		return e.commitProgress(ctx, toBlock)
+	}
+	walletMap := make(map[string]bool, len(activeWallets))
+	targetAddrs := make([]string, 0, len(activeWallets))
+	for _, w := range activeWallets {
+		walletMap[strings.ToLower(w.Address)] = true
+		targetAddrs = append(targetAddrs, w.Address)
+	}
+
+	batchSize := uint64(500)
 	if e.cfg.BatchSize > 0 {
 		batchSize = e.cfg.BatchSize
 	}
-	// 每次最大扫描跨度限制为 20 个块，防止公共 RPC 报 "query returned more than 10000 results" 或超时
 	toBlock := fromBlock + batchSize - 1
 	if toBlock > safeBlock {
 		toBlock = safeBlock
 	}
 
-	// 2. 查出当前正在等待收款的钱包地址（用于内存极速命中过滤）
-	var activeWallets []model.WalletAddress
-	_ = e.db.Where("UPPER(chain) = ? AND enabled = ?", e.Chain(), true).Find(&activeWallets).Error
-	if len(activeWallets) == 0 {
-		// 没有待监听地址，直接推进游标落库，避免白白拉取全网日志
-		return e.commitProgress(ctx, toBlock)
-	}
-	walletMap := make(map[string]bool)
-	for _, w := range activeWallets {
-		walletMap[strings.ToLower(w.Address)] = true
-	}
-	// 3. 查询此区间内的 ERC20 Transfer 日志
-	logs, err := e.client.GetERC20Logs(ctx, fromBlock, toBlock)
+	// 3. 查询此区间内的 ERC20 Transfer 日志（使用服务端 topics 过滤，毫秒级响应）
+	logs, err := e.client.GetERC20Logs(ctx, fromBlock, toBlock, targetAddrs...)
 	if err != nil {
 		return fmt.Errorf("拉取区块 [%d - %d] 日志失败: %w", fromBlock, toBlock, err)
 	}
