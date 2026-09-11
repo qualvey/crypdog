@@ -179,7 +179,7 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		OrderID:        req.OrderID,
 		Chain:          normChain,
 		Token:          req.Token,
-		TargetAddress:  targetAddress,
+		TargetAddress:  normChain.NormalizeAddress(targetAddress),
 		ExpectedAmount: allocatedAmount,
 		TimeoutSeconds: timeoutSec,
 		WebhookURL:     req.WebhookURL,

@@ -170,14 +170,17 @@ func (e *MatcherEngine) queryCandidateIntents(transfer model.ChainTransfer) ([]m
 		tokens = append(tokens, model.TokenUSDT)
 	}
 
+	normAddr := transfer.Chain.NormalizeAddress(transfer.TargetAddress)
+
 	var intents []model.PaymentIntent
 	err := e.db.Where(
-		"status IN (?, ?) AND chain = ? AND token IN (?) AND target_address = ?",
+		"status IN (?, ?) AND chain = ? AND token IN (?) AND (target_address = ? OR LOWER(target_address) = ?)",
 		model.StatusWatching,
 		model.StatusConfirming,
 		transfer.Chain,
 		tokens,
-		transfer.Chain.NormalizeAddress(transfer.TargetAddress),
+		normAddr,
+		strings.ToLower(normAddr),
 	).Find(&intents).Error
 	return intents, err
 }
