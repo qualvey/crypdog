@@ -51,6 +51,7 @@ type ChainTransfer struct {
 	Contract      string `gorm:"size:128;not null;index" json:"contract"` // 新增合约地址
 	FromAddress   string `gorm:"size:128;not null" json:"from"`
 	TargetAddress string `gorm:"size:128;not null;index" json:"targetAddress"` // 对齐 TargetAddress
+	ToAddress     string `gorm:"column:to_address;size:128;default:''" json:"toAddress,omitempty"` // 兼容历史数据库列
 	// 1. 业务可读金额：改用 string 或 shopspring/decimal，坚决不能用 float64（会丢分度）
 	Amount decimal.Decimal `gorm:"type:varchar(64);not null" json:"amount"`
 	// 2. 原始链上精度数值：必须用字符串保存 16 进制转出的十进制无损大数
@@ -269,12 +270,14 @@ func NewChainTransfer(
 	rawValue string,
 	blockNumber uint64,
 ) ChainTransfer {
+	normalizedTarget := chain.NormalizeAddress(targetAddress)
 	return ChainTransfer{
 		Chain:         chain,
 		TxHash:        strings.TrimSpace(txHash),
 		LogIndex:      logIndex,
 		Contract:      chain.NormalizeAddress(contract),
-		TargetAddress: chain.NormalizeAddress(targetAddress), // 自动纠正地址格式
+		TargetAddress: normalizedTarget, // 自动纠正地址格式
+		ToAddress:     normalizedTarget,
 		RawValue:      rawValue,
 		BlockNumber:   blockNumber,
 	}
