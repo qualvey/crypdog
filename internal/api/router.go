@@ -133,6 +133,7 @@ func SetupRouter(h *Handler) *gin.Engine {
 			protected.POST("/intents/allocate", intentHandler.AllocateIntent)
 			protected.GET("/intents/:orderId", intentHandler.GetIntentStatus)
 			protected.POST("/intents/:orderId/cancel", intentHandler.CancelIntent)
+			protected.POST("/intents/cancel", intentHandler.CancelIntent)
 			protected.DELETE("/intents/:orderId", intentHandler.CancelIntent)
 			protected.GET("/transfers", transferHandler.GetTransfers)
 			protected.POST("/intents/simulate", intentHandler.SimulateOnChainTransfer)

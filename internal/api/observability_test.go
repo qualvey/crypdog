@@ -10,6 +10,7 @@ import (
 	"crypdog/internal/config"
 	"crypdog/internal/engine"
 	"crypdog/internal/metrics"
+	"crypdog/internal/model"
 	"crypdog/internal/scanner"
 
 	"github.com/glebarez/sqlite"
@@ -123,3 +124,58 @@ func TestObservability_PprofEndpoints(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.True(t, strings.Contains(w.Body.String(), "Types of profiles available"))
 }
+
+func TestCancelIntentEndpoints(t *testing.T) {
+	db, r := setupTestRouter(t)
+	err := db.AutoMigrate(&model.PaymentIntent{})
+	assert.NoError(t, err)
+
+	intent := model.PaymentIntent{
+		ID:            "intent_arb_001",
+		OrderID:       "ord_cancel_001",
+		Chain:         model.ChainArbitrum,
+		Token:         model.TokenUSDT,
+		TargetAddress: "0x7bdc49542978b16566e82c8f90db1eb03804c675",
+		Status:        model.StatusWatching,
+	}
+	assert.NoError(t, db.Create(&intent).Error)
+
+	// 1. 测试 POST /api/v1/watcher/intents/cancel 带 JSON body
+	body := `{"orderId":"ord_cancel_001"}`
+	req := httptest.NewRequest("POST", "/api/v1/watcher/intents/cancel", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, float64(200), resp["code"])
+
+	var updated model.PaymentIntent
+	assert.NoError(t, db.Where("order_id = ?", "ord_cancel_001").First(&updated).Error)
+	assert.Equal(t, model.StatusCancelled, updated.Status)
+
+	// 2. 测试 POST /api/v1/watcher/intents/:orderId/cancel 路径参数
+	intent2 := model.PaymentIntent{
+		ID:            "intent_arb_002",
+		OrderID:       "ord_cancel_002",
+		Chain:         model.ChainArbitrum,
+		Token:         model.TokenUSDC,
+		TargetAddress: "0x7bdc49542978b16566e82c8f90db1eb03804c675",
+		Status:        model.StatusWatching,
+	}
+	assert.NoError(t, db.Create(&intent2).Error)
+
+	req2 := httptest.NewRequest("POST", "/api/v1/watcher/intents/ord_cancel_002/cancel", nil)
+	req2.Header.Set("Authorization", "Bearer test-secret")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var updated2 model.PaymentIntent
+	assert.NoError(t, db.Where("order_id = ?", "ord_cancel_002").First(&updated2).Error)
+	assert.Equal(t, model.StatusCancelled, updated2.Status)
+}
+

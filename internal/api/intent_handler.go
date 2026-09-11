@@ -294,53 +294,61 @@ func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
 	})
 }
 
-// CancelIntent handles POST /api/v1/watcher/intents/:orderId/cancel or DELETE /api/v1/watcher/intents/:orderId
+type CancelIntentReq struct {
+	OrderID  string `json:"orderId"`
+	IntentID string `json:"intentId"`
+}
+
+// CancelIntent handles:
+// - POST /api/v1/watcher/intents/cancel (JSON body: orderId or intentId)
+// - POST /api/v1/watcher/intents/:orderId/cancel (path param: orderId or intentId)
+// - DELETE /api/v1/watcher/intents/:orderId (path param: orderId or intentId)
 func (h *IntentHandler) CancelIntent(c *gin.Context) {
-	orderID := c.Param("orderId")
-	if orderID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Missing orderId"})
+	var id string
+	if c.Request.Body != nil && c.Request.ContentLength > 0 {
+		var req CancelIntentReq
+		if err := c.ShouldBindJSON(&req); err == nil {
+			if req.OrderID != "" {
+				id = strings.TrimSpace(req.OrderID)
+			} else if req.IntentID != "" {
+				id = strings.TrimSpace(req.IntentID)
+			}
+		}
+	}
+	if id == "" {
+		id = strings.TrimSpace(c.Param("orderId"))
+	}
+	if id == "" {
+		id = strings.TrimSpace(c.Query("orderId"))
+	}
+	if id == "" {
+		id = strings.TrimSpace(c.Query("intentId"))
+	}
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Missing orderId or intentId"})
 		return
 	}
 
-	var intent model.PaymentIntent
-	if err := h.db.Where("order_id = ?", orderID).First(&intent).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Payment intent not found",
-		})
+	intent, err := h.intentService.CancelIntent(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrIntentNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": err.Error()})
+		case errors.Is(err, service.ErrCannotCancelPaid):
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		}
 		return
 	}
-
-	if intent.Status == model.StatusPaid {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": fmt.Sprintf("Cannot cancel payment intent '%s' because it is already PAID", orderID),
-		})
-		return
-	}
-
-	if intent.Status == model.StatusCancelled || intent.Status == model.StatusExpired {
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": fmt.Sprintf("Payment intent '%s' is already %s", orderID, intent.Status),
-			"data": gin.H{
-				"orderId": intent.OrderID,
-				"status":  intent.Status,
-			},
-		})
-		return
-	}
-
-	// Update status to CANCELLED
-	intent.Status = model.StatusCancelled
-	h.db.Save(&intent)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
-		"message": fmt.Sprintf("Payment intent '%s' cancelled successfully", orderID),
+		"message": fmt.Sprintf("Payment intent for order '%s' cancelled successfully", intent.OrderID),
 		"data": gin.H{
-			"orderId": intent.OrderID,
-			"status":  intent.Status,
+			"intentId": intent.ID,
+			"orderId":  intent.OrderID,
+			"status":   intent.Status,
 		},
 	})
 }

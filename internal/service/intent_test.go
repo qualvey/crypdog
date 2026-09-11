@@ -189,3 +189,45 @@ func TestRegisterOrReactivate_AmountCollision(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, service.ErrAmountCollision)
 }
+
+func TestIntentService_CancelIntent(t *testing.T) {
+	db := setupTestDB(t)
+	svc := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+
+	// 1. 创建订单
+	dto := defaultDTO()
+	intent, _, err := svc.RegisterOrReactivate(dto)
+	require.NoError(t, err)
+
+	// 2. 通过 OrderID 取消
+	cancelled, err := svc.CancelIntent(dto.OrderID)
+	assert.NoError(t, err)
+	assert.Equal(t, model.StatusCancelled, cancelled.Status)
+
+	// 3. 再次取消（幂等性）
+	cancelledAgain, err := svc.CancelIntent(intent.ID)
+	assert.NoError(t, err)
+	assert.Equal(t, model.StatusCancelled, cancelledAgain.Status)
+
+	// 4. 已支付订单不可取消
+	paidIntent := model.PaymentIntent{
+		ID:             "intent_paid_001",
+		OrderID:        "ord_paid_001",
+		Chain:          model.ChainTron,
+		Token:          model.TokenUSDT,
+		TargetAddress:  "T9yD14Nj9j7xXv8YmZP2K8qL4W9vR1e3S4",
+		ExpectedAmount: decimal.RequireFromString("50.00"),
+		Status:         model.StatusPaid,
+	}
+	require.NoError(t, db.Create(&paidIntent).Error)
+
+	_, err = svc.CancelIntent(paidIntent.OrderID)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, service.ErrCannotCancelPaid)
+
+	// 5. 不存在的订单
+	_, err = svc.CancelIntent("non_existent_id")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, service.ErrIntentNotFound)
+}
+
