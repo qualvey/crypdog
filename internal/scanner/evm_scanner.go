@@ -17,6 +17,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"github.com/shopspring/decimal"
 )
 
 type TokenMeta struct {
@@ -266,6 +268,21 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			continue
 		}
 
+		// 校验代币合约并提取代币元信息
+		chainTokens, hasChain := knownTokens[e.Chain().ToUpper()]
+		if !hasChain {
+			continue
+		}
+		tokenMeta, isKnown := chainTokens[strings.ToLower(l.Address)]
+		if !isKnown {
+			// 未知或非监控代币（如投毒假币等），直接过滤
+			continue
+		}
+
+		fromAddress := parseAddressFromTopic(l.Topics[1])
+		valDec, _ := decimal.NewFromString(amountBig.String())
+		readableAmount := valDec.Div(decimal.New(1, int32(tokenMeta.Decimals)))
+
 		transfer := model.NewChainTransfer(
 			e.chain,
 			l.TransactionHash,
@@ -275,14 +292,19 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			amountBig.String(),
 			l.BlockNumber,
 		)
+		transfer.Token = tokenMeta.Symbol
+		transfer.Amount = readableAmount
+		transfer.Decimals = uint8(tokenMeta.Decimals)
+		transfer.FromAddress = fromAddress
+		transfer.BlockTimestamp = time.Now().Unix()
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case transferChan <- transfer:
 			metrics.RecordTransferCaptured(string(e.Chain()), string(transfer.Token))
-			log.Printf("[%s Scanner] 捕获充值: Tx=%s, To=%s, RawAmount=%s, Block=%d",
-				e.Chain(), transfer.TxHash, transfer.TargetAddress, transfer.RawValue, transfer.BlockNumber)
+			log.Printf("[%s Scanner] 捕获充值: Tx=%s, To=%s, Token=%s, Amount=%s, RawAmount=%s, Block=%d",
+				e.Chain(), transfer.TxHash, transfer.TargetAddress, transfer.Token, transfer.Amount.String(), transfer.RawValue, transfer.BlockNumber)
 		}
 	}
 

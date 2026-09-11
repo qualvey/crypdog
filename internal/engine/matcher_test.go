@@ -208,3 +208,43 @@ func TestMatcherEngine_ProcessTransfer_AmountMismatch_Ignored(t *testing.T) {
 	assert.Equal(t, model.StatusWatching, unchangedIntent.Status)
 	assert.Empty(t, unchangedIntent.TxHash)
 }
+
+func TestMatcherEngine_ProcessTransfer_UsdtUsdcCrossMatch(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+	engine := NewMatcherEngine(db, cfg, dispatcher)
+
+	targetAddr := "0x7bdc49542978b16566e82c8f90db1eb03804c675"
+	// 订单约定币种是 USDT，金额 0.1501
+	intent := model.PaymentIntent{
+		ID:             "intent_cross_001",
+		OrderID:        "ord_cross_001",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("0.150100"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	// 链上实际支付的是 USDC，金额 0.1501
+	transfer := model.ChainTransfer{
+		TxHash:         "0xhash_cross_usdc_payment",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDC,
+		TargetAddress:  targetAddr,
+		Amount:         decimal.RequireFromString("0.150100"),
+		BlockNumber:    100,
+		BlockTimestamp: time.Now().Unix(),
+	}
+
+	err := engine.ProcessTransfer(transfer, 115)
+	require.NoError(t, err)
+
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_cross_001").First(&updatedIntent).Error)
+	assert.Equal(t, model.StatusPaid, updatedIntent.Status, "USDC 充值应能成功撮合 USDT 等价订单")
+	assert.Equal(t, "0xhash_cross_usdc_payment", updatedIntent.TxHash)
+}
+

@@ -136,7 +136,9 @@ func (a *App) safeProcess(t model.ChainTransfer) {
 	if currentBlock < t.BlockNumber {
 		currentBlock = t.BlockNumber
 	}
-	a.matcher.ProcessTransfer(t, currentBlock)
+	if err := a.matcher.ProcessTransfer(t, currentBlock); err != nil {
+		log.Printf("[Matcher] 处理转账失败: %v, Tx=%s", err, t.TxHash)
+	}
 }
 
 func (a *App) startHTTP() error {

@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,8 @@ func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlo
 	intents, err := e.queryCandidateIntents(transfer)
 	if err != nil || len(intents) == 0 {
 		metrics.RecordTransferMatch(string(transfer.Chain), false)
+		log.Printf("[Matcher] 未找到匹配候选意向: Chain=%s, Token=%s, To=%s, Amount=%s, Tx=%s",
+			transfer.Chain, transfer.Token, transfer.TargetAddress, transfer.Amount.String(), transfer.TxHash)
 		return err
 	}
 
@@ -65,10 +68,14 @@ func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlo
 	matchedIntent := e.findMatchedIntent(intents, transfer.Amount)
 	if matchedIntent == nil {
 		metrics.RecordTransferMatch(string(transfer.Chain), false)
+		log.Printf("[Matcher] 金额不匹配候选意向: Tx=%s, Amount=%s, 候选订单数=%d",
+			transfer.TxHash, transfer.Amount.String(), len(intents))
 		return nil
 	}
 
 	metrics.RecordTransferMatch(string(transfer.Chain), true)
+	log.Printf("[Matcher] 🎉 成功匹配订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
+		matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
 
 	// 4. 状态推进与结算（事务 + 触发通知）
 	return e.settle(matchedIntent, &transfer, currentBlockNumber)
@@ -155,13 +162,21 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 	return nil
 }
 func (e *MatcherEngine) queryCandidateIntents(transfer model.ChainTransfer) ([]model.PaymentIntent, error) {
+	tokens := []model.Token{transfer.Token}
+	// 支持 USDT 与 USDC 等价稳定币互通撮合
+	if transfer.Token == model.TokenUSDT {
+		tokens = append(tokens, model.TokenUSDC)
+	} else if transfer.Token == model.TokenUSDC {
+		tokens = append(tokens, model.TokenUSDT)
+	}
+
 	var intents []model.PaymentIntent
 	err := e.db.Where(
-		"status IN (?, ?) AND chain = ? AND token = ? AND target_address = ?",
+		"status IN (?, ?) AND chain = ? AND token IN (?) AND target_address = ?",
 		model.StatusWatching,
 		model.StatusConfirming,
 		transfer.Chain,
-		transfer.Token,
+		tokens,
 		transfer.Chain.NormalizeAddress(transfer.TargetAddress),
 	).Find(&intents).Error
 	return intents, err
