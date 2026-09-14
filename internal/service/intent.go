@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"crypdog/internal/engine"
@@ -20,13 +21,15 @@ var (
 	ErrOrderAlreadyPaid = errors.New("order has already been paid")
 	ErrAmountCollision  = errors.New("amount collision detected on target address")
 	ErrParamMutation    = errors.New("active order cannot mutate parameters")
-	ErrIntentNotFound   = errors.New("payment intent not found")
-	ErrCannotCancelPaid = errors.New("cannot cancel payment intent because it is already paid")
+	ErrIntentNotFound         = errors.New("payment intent not found")
+	ErrCannotCancelPaid       = errors.New("cannot cancel payment intent because it is already paid")
+	ErrCannotCancelConfirming = errors.New("cannot cancel payment intent because it is currently confirming on-chain")
 )
 
 type IntentService struct {
 	db          *gorm.DB
 	poolManager *engine.MicroAmountManager
+	mu          sync.Mutex
 }
 
 func NewIntentService(db *gorm.DB, pool *engine.MicroAmountManager) *IntentService {
@@ -45,6 +48,9 @@ type RegisterDTO struct {
 
 // RegisterOrReactivate 封装完整的订单创建、重激活与幂等状态机
 func (s *IntentService) RegisterOrReactivate(dto RegisterDTO) (*model.PaymentIntent, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var existing model.PaymentIntent
 	err := s.db.Where("order_id = ?", dto.OrderID).First(&existing).Error
 
@@ -133,7 +139,7 @@ func (s *IntentService) resetExistingIntent(intent *model.PaymentIntent, dto Reg
 	now := time.Now()
 	intent.Chain = dto.Chain
 	intent.Token = dto.Token
-	intent.TargetAddress = dto.TargetAddress
+	intent.TargetAddress = dto.Chain.NormalizeAddress(dto.TargetAddress)
 	intent.ExpectedAmount = dto.ExpectedAmount
 	intent.ReceivedAmount = decimal.New(0, 0)
 	intent.WebhookURL = dto.WebhookURL
@@ -145,6 +151,88 @@ func (s *IntentService) resetExistingIntent(intent *model.PaymentIntent, dto Reg
 	intent.ExpiresAt = now.Add(time.Duration(dto.TimeoutSeconds) * time.Second)
 	intent.PaidAt = nil
 	intent.UpdatedAt = now
+}
+
+type AllocateDTO struct {
+	OrderID        string
+	Chain          model.Chain
+	Token          model.Token
+	BaseAmount     decimal.Decimal
+	TimeoutSeconds int
+	WebhookURL     string
+}
+
+// AllocateOrReactivate 为订单智能分配唯一微数并注册或重激活监听
+func (s *IntentService) AllocateOrReactivate(dto AllocateDTO) (*model.PaymentIntent, decimal.Decimal, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.poolManager == nil {
+		return nil, decimal.Zero, false, fmt.Errorf("poolmanager was nil")
+	}
+
+	normChain := model.NormalizeChain(string(dto.Chain))
+	dto.Chain = normChain
+
+	var existing model.PaymentIntent
+	err := s.db.Where("order_id = ?", dto.OrderID).First(&existing).Error
+
+	if err == nil {
+		switch existing.Status {
+		case model.StatusPaid:
+			return nil, decimal.Zero, false, ErrOrderAlreadyPaid
+
+		case model.StatusWatching, model.StatusConfirming:
+			tail := existing.ExpectedAmount.Sub(dto.BaseAmount)
+			return &existing, tail, true, nil
+
+		case model.StatusCancelled, model.StatusExpired:
+			targetAddr, allocatedAmount, err := s.poolManager.AllocateUniqueAmount(normChain, dto.Token, dto.BaseAmount)
+			if err != nil {
+				return nil, decimal.Zero, false, err
+			}
+			regDTO := RegisterDTO{
+				OrderID:        dto.OrderID,
+				Chain:          normChain,
+				Token:          dto.Token,
+				TargetAddress:  targetAddr,
+				ExpectedAmount: allocatedAmount,
+				TimeoutSeconds: dto.TimeoutSeconds,
+				WebhookURL:     dto.WebhookURL,
+			}
+			s.resetExistingIntent(&existing, regDTO)
+			if err := s.db.Save(&existing).Error; err != nil {
+				return nil, decimal.Zero, false, err
+			}
+			tail := allocatedAmount.Sub(dto.BaseAmount)
+			return &existing, tail, false, nil
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, decimal.Zero, false, err
+	}
+
+	// 全新订单分配
+	targetAddr, allocatedAmount, err := s.poolManager.AllocateUniqueAmount(normChain, dto.Token, dto.BaseAmount)
+	if err != nil {
+		return nil, decimal.Zero, false, err
+	}
+
+	regDTO := RegisterDTO{
+		OrderID:        dto.OrderID,
+		Chain:          normChain,
+		Token:          dto.Token,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: allocatedAmount,
+		TimeoutSeconds: dto.TimeoutSeconds,
+		WebhookURL:     dto.WebhookURL,
+	}
+
+	intent := s.buildNewIntent(regDTO)
+	if err := s.db.Create(&intent).Error; err != nil {
+		return nil, decimal.Zero, false, err
+	}
+	tail := allocatedAmount.Sub(dto.BaseAmount)
+	return &intent, tail, false, nil
 }
 
 func (s *IntentService) buildNewIntent(dto RegisterDTO) model.PaymentIntent {
@@ -183,6 +271,10 @@ func (s *IntentService) CancelIntent(idOrOrderID string) (*model.PaymentIntent, 
 
 	if intent.Status == model.StatusPaid {
 		return nil, fmt.Errorf("%w: %s", ErrCannotCancelPaid, id)
+	}
+
+	if intent.Status == model.StatusConfirming {
+		return nil, fmt.Errorf("%w: %s", ErrCannotCancelConfirming, id)
 	}
 
 	if intent.Status == model.StatusCancelled || intent.Status == model.StatusExpired {

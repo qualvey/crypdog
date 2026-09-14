@@ -222,9 +222,9 @@ type WalletAddress struct {
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
 
 	// 资产属性
-	Chain   Chain  `gorm:"size:32;not null;index:idx_chain_enabled" json:"chain"` // 如: "TRON", "ETH", "BSC"
-	Address string `gorm:"size:128;not null;uniqueIndex" json:"address"`          // 链上实际收款地址
-	Label   string `gorm:"size:64" json:"label,omitempty"`                        // 备注/冷钱包标签 (如 "Binance Hot 01")
+	Chain   Chain  `gorm:"size:32;not null;index:idx_chain_enabled;uniqueIndex:idx_chain_address,priority:1" json:"chain"` // 如: "TRON", "ETH", "BSC"
+	Address string `gorm:"size:128;not null;uniqueIndex:idx_chain_address,priority:2" json:"address"`                     // 链上实际收款地址
+	Label   string `gorm:"size:64" json:"label,omitempty"`                                                               // 备注/冷钱包标签 (如 "Binance Hot 01")
 
 	// 状态控制
 	Enabled bool `gorm:"not null;default:true;index:idx_chain_enabled" json:"enabled"` // 是否启用接收新付款
@@ -279,3 +279,4 @@ func NewChainTransfer(
 		BlockNumber:   blockNumber,
 	}
 }
+

@@ -1,6 +1,8 @@
 package service_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -229,5 +231,172 @@ func TestIntentService_CancelIntent(t *testing.T) {
 	_, err = svc.CancelIntent("non_existent_id")
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, service.ErrIntentNotFound)
+}
+
+func TestIntentService_AllocateOrReactivate(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.WalletAddress{}))
+
+	// 创建可用收款地址
+	wallet := model.WalletAddress{
+		Chain:   model.ChainArbitrum,
+		Address: "0x7bdc49542978b16566e82c8f90db1eb03804c675",
+		Enabled: true,
+	}
+	require.NoError(t, db.Create(&wallet).Error)
+
+	svc := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+
+	allocDTO := service.AllocateDTO{
+		OrderID:        "ord_alloc_001",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		BaseAmount:     decimal.NewFromInt(10),
+		TimeoutSeconds: 1800,
+		WebhookURL:     "https://example.com/webhook",
+	}
+
+	// 1. 全新分配
+	intent, tail, isIdempotent, err := svc.AllocateOrReactivate(allocDTO)
+	require.NoError(t, err)
+	assert.False(t, isIdempotent)
+	assert.Equal(t, model.StatusWatching, intent.Status)
+	assert.True(t, intent.ExpectedAmount.GreaterThan(allocDTO.BaseAmount))
+	assert.True(t, tail.GreaterThan(decimal.Zero))
+
+	// 2. 幂等重复调用：返回已有订单
+	intentSame, tailSame, isIdempotentSame, err := svc.AllocateOrReactivate(allocDTO)
+	require.NoError(t, err)
+	assert.True(t, isIdempotentSame)
+	assert.Equal(t, intent.ID, intentSame.ID)
+	assert.Equal(t, tail.String(), tailSame.String())
+
+	// 3. 将订单取消后，再次通过 AllocateOrReactivate 进行分配（验证重激活能力，不报 UNIQUE 约束冲突）
+	intent.Status = model.StatusCancelled
+	require.NoError(t, db.Save(intent).Error)
+
+	reactivated, _, isIdempotentReactivated, err := svc.AllocateOrReactivate(allocDTO)
+	require.NoError(t, err)
+	assert.False(t, isIdempotentReactivated)
+	assert.Equal(t, intent.ID, reactivated.ID)
+	assert.Equal(t, model.StatusWatching, reactivated.Status)
+
+	// 4. 将订单设为已支付后，再次 Allocate 应当被拒绝
+	reactivated.Status = model.StatusPaid
+	require.NoError(t, db.Save(reactivated).Error)
+
+	_, _, _, err = svc.AllocateOrReactivate(allocDTO)
+	assert.ErrorIs(t, err, service.ErrOrderAlreadyPaid)
+}
+
+// 8. 测试高并发下的微数分配安全性（防撞车竞争条件）
+func TestAllocateOrReactivate_ConcurrentSafety(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.WalletAddress{}))
+
+	wallet := model.WalletAddress{
+		Chain:     model.ChainArbitrum,
+		Address:   "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		Enabled:   true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	require.NoError(t, db.Create(&wallet).Error)
+
+	svc := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+
+	concurrency := 20
+	var wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+	amounts := make(chan decimal.Decimal, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(orderIdx int) {
+			defer wg.Done()
+			dto := service.AllocateDTO{
+				OrderID:        fmt.Sprintf("ord_concurrent_%d", orderIdx),
+				Chain:          model.ChainArbitrum,
+				Token:          model.TokenUSDC,
+				BaseAmount:     decimal.NewFromInt(10),
+				TimeoutSeconds: 1800,
+				WebhookURL:     "https://example.com/webhook",
+			}
+			intent, _, _, err := svc.AllocateOrReactivate(dto)
+			if err != nil {
+				errs <- err
+				return
+			}
+			amounts <- intent.ExpectedAmount
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+	close(amounts)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	allocatedMap := make(map[string]bool)
+	count := 0
+	for amt := range amounts {
+		count++
+		assert.False(t, allocatedMap[amt.String()], "Amount %s should not be duplicated across concurrent allocations", amt.String())
+		allocatedMap[amt.String()] = true
+	}
+	assert.Equal(t, concurrency, count)
+}
+
+func TestCancelIntent_Restrictions(t *testing.T) {
+	db := setupTestDB(t)
+	svc := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+
+	// 1. Confirming 订单禁止取消
+	confirmingIntent := model.PaymentIntent{
+		ID:             "intent_confirming_1",
+		OrderID:        "ord_confirming_1",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		TargetAddress:  "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		ExpectedAmount: decimal.RequireFromString("10.000100"),
+		Status:         model.StatusConfirming,
+	}
+	require.NoError(t, db.Create(&confirmingIntent).Error)
+
+	_, err := svc.CancelIntent("ord_confirming_1")
+	assert.ErrorIs(t, err, service.ErrCannotCancelConfirming)
+
+	// 2. Paid 订单禁止取消
+	paidIntent := model.PaymentIntent{
+		ID:             "intent_paid_2",
+		OrderID:        "ord_paid_2",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		TargetAddress:  "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		ExpectedAmount: decimal.RequireFromString("10.000200"),
+		Status:         model.StatusPaid,
+	}
+	require.NoError(t, db.Create(&paidIntent).Error)
+
+	_, err = svc.CancelIntent("ord_paid_2")
+	assert.ErrorIs(t, err, service.ErrCannotCancelPaid)
+
+	// 3. Watching 订单允许取消
+	watchingIntent := model.PaymentIntent{
+		ID:             "intent_watching_3",
+		OrderID:        "ord_watching_3",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		TargetAddress:  "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		ExpectedAmount: decimal.RequireFromString("10.000300"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&watchingIntent).Error)
+
+	cancelled, err := svc.CancelIntent("ord_watching_3")
+	assert.NoError(t, err)
+	assert.Equal(t, model.StatusCancelled, cancelled.Status)
 }
 

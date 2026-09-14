@@ -9,6 +9,25 @@ import (
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
+// Config 根配置结构体
+type Config struct {
+	ServerPort        string         `yaml:"server_port"`
+	ServiceSecret     string         `yaml:"service_secret"`
+	WebhookSecret     string         `yaml:"webhook_secret"`
+	WebhookAllowLocal *bool          `yaml:"webhook_allow_local"`
+	Server            ServerConfig   `yaml:"server"`
+	ScanIntervalSec   int            `yaml:"scan_interval_sec" env:"SCAN_INTERVAL_SEC" env-default:"5"`
+	Webhook           WebhookConfig  `yaml:"webhook"`
+	Database          DatabaseConfig `yaml:"database"`
+	Monitor         MonitorConfig  `yaml:"monitor"`
+	Log             LogConfig      `yaml:"log"`
+	Metrics         MetricsConfig  `yaml:"metrics"`
+	Pprof           PprofConfig    `yaml:"pprof"`
+	//全大写
+	Chains         map[model.Chain]ChainNodeConfig `yaml:"chains"`
+	InitialWallets []InitialWallet                 `yaml:"initial_wallets"`
+}
+
 // ChainNodeConfig 节点配置
 type ChainNodeConfig struct {
 	Enabled       *bool    `yaml:"enabled"`
@@ -19,10 +38,11 @@ type ChainNodeConfig struct {
 
 	ScanIntervalSec int `yaml:"scan_interval_sec" env-default:"3"`
 	// 扫链核心参数（防丢单、防分叉）
-	Confirmations uint64 `yaml:"confirmations" env-default:"12"` // 确认块数
-	BlockDelay    uint64 `yaml:"block_delay" env-default:"3"`    // 安全滞后扫描，防软分叉
-	BatchSize     uint64 `yaml:"batch_size" env-default:"10"`    // 单次批量获取块数
-	StartBlock    uint64 `yaml:"start_block"`                    // 首次启动若无记录从哪个块开始
+	Confirmations uint64            `yaml:"confirmations" env-default:"12"` // 确认块数
+	BlockDelay    uint64            `yaml:"block_delay" env-default:"10"`   // 安全滞后扫描，防软分叉
+	BatchSize     uint64            `yaml:"batch_size" env-default:"500"`   // 单次批量获取块数
+	StartBlock    uint64            `yaml:"start_block"`                    // 首次启动若无记录从哪个块开始
+	Tokens        []model.TokenSpec `yaml:"tokens"`                         //
 
 	// 可选的异构专有扩展（如果某条链有极其特殊的参数）
 	Extra map[string]string `yaml:"extra"`
@@ -49,6 +69,7 @@ type WebhookConfig struct {
 	Secret     string `yaml:"webhook_secret" env:"SHARED_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
 	MaxRetries int    `yaml:"max_retries" env-default:"3"`
 	TimeoutSec int    `yaml:"timeout_sec" env-default:"5"`
+	AllowLocal bool   `yaml:"allow_local" env:"WEBHOOK_ALLOW_LOCAL" env-default:"false"`
 }
 
 type MonitorConfig struct {
@@ -57,9 +78,9 @@ type MonitorConfig struct {
 // LogConfig 日志配置
 type LogConfig struct {
 	Level    string `yaml:"level" env:"LOG_LEVEL" env-default:"info"`
-	Format   string `yaml:"format" env:"LOG_FORMAT" env-default:"text"`       // text 或 json
-	Output   string `yaml:"output" env:"LOG_OUTPUT" env-default:"stdout"`   // stdout 或 file
-	FilePath string `yaml:"file_path" env:"LOG_FILE_PATH"`                 // 文件路径，如 logs/crypdog.log
+	Format   string `yaml:"format" env:"LOG_FORMAT" env-default:"text"`   // text 或 json
+	Output   string `yaml:"output" env:"LOG_OUTPUT" env-default:"stdout"` // stdout 或 file
+	FilePath string `yaml:"file_path" env:"LOG_FILE_PATH"`                // 文件路径，如 logs/crypdog.log
 }
 
 // MetricsConfig 指标暴露配置
@@ -71,21 +92,6 @@ type MetricsConfig struct {
 // PprofConfig 性能探针配置
 type PprofConfig struct {
 	Enabled bool `yaml:"enabled" env:"PPROF_ENABLED" env-default:"false"`
-}
-
-// Config 根配置结构体
-type Config struct {
-	Server          ServerConfig   `yaml:"server"`
-	ScanIntervalSec int            `yaml:"scan_interval_sec" env:"SCAN_INTERVAL_SEC" env-default:"5"`
-	Webhook         WebhookConfig  `yaml:"webhook"`
-	Database        DatabaseConfig `yaml:"database"`
-	Monitor         MonitorConfig  `yaml:"monitor"`
-	Log             LogConfig      `yaml:"log"`
-	Metrics         MetricsConfig  `yaml:"metrics"`
-	Pprof           PprofConfig    `yaml:"pprof"`
-	//全大写
-	Chains         map[model.Chain]ChainNodeConfig `yaml:"chains"`
-	InitialWallets []InitialWallet                 `yaml:"initial_wallets"`
 }
 
 // LoadConfig 最佳实践加载流程：优先读 YAML 文件，随后读取环境变量覆盖
@@ -107,6 +113,19 @@ func LoadConfig(configPath ...string) (*Config, error) {
 		if err := cleanenv.ReadEnv(&cfg); err != nil {
 			return nil, fmt.Errorf("解析环境变量配置失败: %w", err)
 		}
+	}
+
+	if cfg.ServerPort != "" {
+		cfg.Server.Port = cfg.ServerPort
+	}
+	if cfg.ServiceSecret != "" {
+		cfg.Server.Secret = cfg.ServiceSecret
+	}
+	if cfg.WebhookSecret != "" {
+		cfg.Webhook.Secret = cfg.WebhookSecret
+	}
+	if cfg.WebhookAllowLocal != nil {
+		cfg.Webhook.AllowLocal = *cfg.WebhookAllowLocal
 	}
 
 	return &cfg, nil

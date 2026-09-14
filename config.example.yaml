@@ -3,6 +3,10 @@ service_secret: "crypdog-secret-key-123456"
 webhook_secret: "crypdog-webhook-secret-987654"
 scan_interval_sec: 5
 
+webhook:
+  webhook_secret: "crypdog-webhook-secret-987654"
+  allow_local: true # 本地开发/联调设为 true，允许 localhost/127.0.0.1 闭环回调；生产环境设为 false 防 SSRF
+
 database:
   driver: "sqlite" # "sqlite" 或 "postgres"
   dsn: "crypdog.db"
@@ -33,7 +37,9 @@ chains:
   ARBITRUM:
     driver: "evm"
     rpc_url: "https://arb1.arbitrum.io/rpc"
-    confirmations: 3
+    batch_size: 500
+    block_delay: 20
+    confirmations: 10
   POLYGON:
     driver: "evm"
     rpc_url: "https://polygon-rpc.com"

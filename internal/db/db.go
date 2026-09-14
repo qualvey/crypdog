@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -22,7 +23,17 @@ func InitDB(cfg *config.Config) *gorm.DB {
 		DB, err = gorm.Open(postgres.Open(cfg.Database.DSN), &gorm.Config{})
 	} else {
 		// Pure-Go SQLite driver for zero-CGO local development and testing
-		DB, err = gorm.Open(sqlite.Open(cfg.Database.DSN), &gorm.Config{})
+		// 自动追加 WAL 模式、5000ms busy_timeout 与 NORMAL synchronous，彻底解决多协程并发写入时的 database is locked
+		dsn := cfg.Database.DSN
+		if !strings.Contains(dsn, "_pragma") {
+			delimiter := "?"
+			if strings.Contains(dsn, "?") {
+				delimiter = "&"
+			}
+			dsn = fmt.Sprintf("%s%s_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", dsn, delimiter)
+		}
+		log.Println("⚠️ [Database Notice] 当前使用 SQLite。生产环境或多副本集群部署建议切换为 PostgreSQL。已自动配置 WAL 模式与 5s 忙等待防锁。")
+		DB, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	}
 
 	if err != nil {
@@ -67,34 +78,37 @@ func seedInitialWallets(database *gorm.DB, wallets []config.InitialWallet) {
 		return
 	}
 
-	var activeAddrs []string
+	chainAddrsMap := make(map[model.Chain][]string)
 	for _, w := range wallets {
 		addr := strings.TrimSpace(w.Address)
 		if addr == "" || strings.TrimSpace(w.Chain) == "" {
 			continue
 		}
-		activeAddrs = append(activeAddrs, addr)
+		normChain := model.NormalizeChain(w.Chain)
+		chainAddrsMap[normChain] = append(chainAddrsMap[normChain], addr)
 
 		// 1. 配置中存在的地址：更新或插入，确保 enabled = true
 		wallet := model.WalletAddress{
-			Chain:     model.NormalizeChain(w.Chain),
+			Chain:     normChain,
 			Address:   addr,
 			Label:     strings.TrimSpace(w.Label),
 			Enabled:   true,
 			UpdatedAt: time.Now(),
 		}
-		// 使用 OnConflict 在地址已存在时恢复 enabled = true 并更新 label
+		// 使用 OnConflict 在 (chain, address) 已存在时恢复 enabled = true 并更新 label
 		database.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "address"}},
-			DoUpdates: clause.AssignmentColumns([]string{"enabled", "label", "chain", "updated_at"}),
+			Columns:   []clause.Column{{Name: "chain"}, {Name: "address"}},
+			DoUpdates: clause.AssignmentColumns([]string{"enabled", "label", "updated_at"}),
 		}).Create(&wallet)
 	}
 
-	// 2. 关键：不在当前配置列表里的旧地址，自动软下线 (enabled = false)
-	// 既不破坏历史订单的外键和数据审计，新订单也不会再分配到被剔除的旧地址
-	if len(activeAddrs) > 0 {
-		database.Model(&model.WalletAddress{}).
-			Where("address NOT IN ?", activeAddrs).
-			Update("enabled", false)
+	// 2. 关键：仅针对本次配置中涉及的公链，不在配置列表里的旧地址执行软下线
+	// 避免配置了某条链钱包却导致已有的其他链收款地址被误伤全量禁用
+	for chain, addrs := range chainAddrsMap {
+		if len(addrs) > 0 {
+			database.Model(&model.WalletAddress{}).
+				Where("chain = ? AND address NOT IN ?", chain, addrs).
+				Update("enabled", false)
+		}
 	}
 }

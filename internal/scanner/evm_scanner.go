@@ -21,11 +21,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-type TokenMeta struct {
-	Symbol   model.Token
-	Decimals int
-}
-
 const ERC20TransferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 func parseAddressFromTopic(topic string) string {
@@ -37,12 +32,11 @@ func parseAddressFromTopic(topic string) string {
 	return "0x" + strings.ToLower(clean[len(clean)-40:])
 }
 
-var knownTokens = map[string]map[string]TokenMeta{
+var knownTokens = map[string]map[string]model.TokenSpec{
 	"ARBITRUM": {
 		"0xaf88d065e77c8cc2239327c5edb3a432268e5831": {Symbol: model.TokenUSDC, Decimals: 6}, // Native USDC
 		"0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": {Symbol: model.TokenUSDC, Decimals: 6}, // Bridged USDC.e
 		"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": {Symbol: model.TokenUSDT, Decimals: 6}, // USDT
-		"0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": {Symbol: "DAI", Decimals: 18},
 	},
 	"BSC": {
 		"0x55d398326f99059ff775485246999027b3197955": {Symbol: model.TokenUSDT, Decimals: 18},
@@ -72,30 +66,107 @@ type EvmScanner struct {
 	latestBlock atomic.Uint64 // 当前全网高度
 	scannedSlot uint64        // 当前已确认落库的扫描进度 (单协程内维护无需 atomic)
 	curBatch    uint64        // 动态 batch 大小 (支持遇到 10000 limit 时自适应下调)
+	// 新增：本链支持的代币集合 (Key 为小写合约地址，原生币可约定为空字符串)
+	tokensMu sync.RWMutex
+	tokens   map[string]model.TokenSpec // 或使用自定义的 TokenMeta
 
 	// 监控目标缓存 (需提供并发安全读写)
 	watchMu sync.RWMutex
 	wallets map[string]struct{} // O(1) 匹配监控地址
+
+	// 区块链上真实时间戳缓存，避免同块多次调用 RPC
+	blockTimeMu    sync.RWMutex
+	blockTimeCache map[uint64]int64
 }
 
-func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.Config) *EvmScanner {
-	var nodeCfg config.ChainNodeConfig
-	if cfg != nil {
-		nodeCfg = cfg.Chains[Chain]
+func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.ChainNodeConfig) (*EvmScanner, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("chain %s config is nil", Chain)
 	}
-	return &EvmScanner{
-		chain:   Chain,
-		db:      db,
-		cfg:     &nodeCfg,
-		client:  *NewEvmRPCClient(nodeCfg.RPCURL),
-		wallets: make(map[string]struct{}),
+	scanner := &EvmScanner{
+		chain:          Chain,
+		db:             db,
+		cfg:            cfg,
+		client:         *NewEvmRPCClient(cfg.RPCURL),
+		wallets:        make(map[string]struct{}),
+		tokens:         make(map[string]model.TokenSpec),
+		blockTimeCache: make(map[uint64]int64),
 	}
+	chainkey := strings.ToUpper(string(Chain))
+	if defaultTokens, ok := knownTokens[chainkey]; ok {
+		for contract, meta := range defaultTokens {
+			scanner.tokens[strings.ToLower(contract)] = model.TokenSpec{
+				Identifier: strings.ToLower(contract),
+				Symbol:     meta.Symbol,
+				Decimals:   meta.Decimals,
+			}
+		}
+	}
+	// 2. 外部注入：从 cfg.Tokens 追加或覆盖自定义代币
+	for _, t := range cfg.Tokens {
+		if t.Identifier == "" {
+			continue
+		}
+		scanner.tokens[strings.ToLower(t.Identifier)] = model.TokenSpec{
+			Identifier: strings.ToLower(t.Identifier),
+			Symbol:     t.Symbol,
+			Decimals:   t.Decimals,
+		}
+	}
+	return scanner, nil
 }
 func (s *EvmScanner) Chain() model.Chain {
 	return s.chain
 }
 func (s *EvmScanner) GetLatestBlock() uint64 {
 	return s.latestBlock.Load()
+}
+func (s *EvmScanner) SupportedTokens() []model.TokenSpec {
+	s.tokensMu.RLock()
+	defer s.tokensMu.RUnlock()
+	list := make([]model.TokenSpec, 0, len(s.tokens))
+	for _, spec := range s.tokens {
+		list = append(list, spec)
+	}
+	return list
+}
+
+// VerifyTransaction 二次核验交易在主链上是否成功确认，防孤儿块与重组回滚
+func (s *EvmScanner) VerifyTransaction(ctx context.Context, txHash string, blockNumber uint64) (bool, error) {
+	receipt, err := s.client.GetTransactionReceipt(ctx, txHash)
+	if err != nil {
+		return false, err
+	}
+	if receipt == nil {
+		return false, nil // 交易收据不存在（可能未打包或已被回滚丢弃）
+	}
+	// status "0x1" 表示 EVM 交易执行成功
+	cleanStatus := strings.TrimPrefix(strings.ToLower(receipt.Status), "0x")
+	return cleanStatus == "1", nil
+}
+
+// getBlockTimestamp 优先从内存缓存获取区块真实链上时间戳，未命中则实时请求链上 RPC 并缓存
+func (s *EvmScanner) getBlockTimestamp(ctx context.Context, blockNumber uint64) int64 {
+	s.blockTimeMu.RLock()
+	ts, ok := s.blockTimeCache[blockNumber]
+	s.blockTimeMu.RUnlock()
+	if ok && ts > 0 {
+		return ts
+	}
+
+	chainTs, err := s.client.GetBlockTimestamp(ctx, blockNumber)
+	if err != nil || chainTs <= 0 {
+		log.Printf("[%s Scanner] 无法从 RPC 获取区块 %d 时间戳: %v", s.Chain(), blockNumber, err)
+		return time.Now().Unix()
+	}
+
+	s.blockTimeMu.Lock()
+	if len(s.blockTimeCache) > 2000 {
+		s.blockTimeCache = make(map[uint64]int64)
+	}
+	s.blockTimeCache[blockNumber] = chainTs
+	s.blockTimeMu.Unlock()
+	return chainTs
 }
 
 func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainTransfer) error {
@@ -287,12 +358,10 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			continue
 		}
 
-		// 校验代币合约并提取代币元信息
-		chainTokens, hasChain := knownTokens[e.Chain().ToUpper()]
-		if !hasChain {
-			continue
-		}
-		tokenMeta, isKnown := chainTokens[strings.ToLower(l.Address)]
+		// 校验代币合约并提取代币元信息（支持 knownTokens 及 config 自定义注入代币）
+		e.tokensMu.RLock()
+		tokenMeta, isKnown := e.tokens[strings.ToLower(l.Address)]
+		e.tokensMu.RUnlock()
 		if !isKnown {
 			// 未知或非监控代币（如投毒假币等），直接过滤
 			continue
@@ -315,7 +384,19 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 		transfer.Amount = readableAmount
 		transfer.Decimals = uint8(tokenMeta.Decimals)
 		transfer.FromAddress = fromAddress
-		transfer.BlockTimestamp = time.Now().Unix()
+		transfer.BlockTimestamp = e.getBlockTimestamp(ctx, l.BlockNumber)
+
+		// 关键数据安全保障：流水先落库持久化，再推入内存 Channel，防止崩溃位点推进导致丢单
+		if e.db != nil {
+			_ = e.db.WithContext(ctx).Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "chain"},
+					{Name: "tx_hash"},
+					{Name: "log_index"},
+				},
+				DoNothing: true,
+			}).Create(&transfer).Error
+		}
 
 		select {
 		case <-ctx.Done():

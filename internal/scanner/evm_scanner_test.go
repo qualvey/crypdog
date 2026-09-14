@@ -1,7 +1,11 @@
 package scanner
 
 import (
+	"context"
+	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -49,4 +53,71 @@ func TestEvmLogParsing_KnownTokensAndDecimals(t *testing.T) {
 	unknownContract := "0x1111111111111111111111111111111111111111"
 	_, isUnknownMatched := chainTokens[unknownContract]
 	assert.False(t, isUnknownMatched)
+}
+
+func TestEvmRPCClient_GetBlockTimestamp(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		assert.NoError(t, err)
+
+		if req.Method == "eth_getBlockByNumber" {
+			// 模拟返回区块时间戳 1700000000 (0x6553f100)
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"timestamp": "0x6553f100",
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewEvmRPCClient(server.URL)
+	ts, err := client.GetBlockTimestamp(context.Background(), 123456)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1700000000), ts)
+}
+
+func TestEvmScanner_BlockTimestampCaching(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Method == "eth_getBlockByNumber" {
+			callCount++
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"timestamp": "0x6553f100", // 1700000000
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	scanner := &EvmScanner{
+		chain:          model.ChainArbitrum,
+		client:         *NewEvmRPCClient(server.URL),
+		blockTimeCache: make(map[uint64]int64),
+	}
+
+	// 第一次调用：缓存未命中，调用 RPC
+	ts1 := scanner.getBlockTimestamp(context.Background(), 99999)
+	assert.Equal(t, int64(1700000000), ts1)
+	assert.Equal(t, 1, callCount)
+
+	// 第二次调用同高度：命中缓存，不应调用 RPC
+	ts2 := scanner.getBlockTimestamp(context.Background(), 99999)
+	assert.Equal(t, int64(1700000000), ts2)
+	assert.Equal(t, 1, callCount, "同一个区块时间戳应走缓存，不应重复请求 RPC")
 }

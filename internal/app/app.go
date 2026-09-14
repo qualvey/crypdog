@@ -53,31 +53,31 @@ func (a *App) Run() error {
 	defer cancel()
 	a.transferChan = make(chan model.ChainTransfer, 500)
 	a.dispatcher = queue.NewWebhookDispatcher(a.db, a.cfg)
-	a.matcher = engine.NewMatcherEngine(a.db, a.cfg, a.dispatcher)
 	// 3. 扫描器（细节放到 scanner 包）
 	a.scannerMgr = scanner.NewManager()
 
-	a.scannerMgr.RegisterDriver("evm", func(chain model.Chain, db *gorm.DB, cfg *config.Config) scanner.Scanner {
-		return scanner.NewEvmScanner(chain, db, cfg)
+	a.scannerMgr.RegisterDriver("evm", func(chain model.Chain, db *gorm.DB, chainCfg config.ChainNodeConfig) (scanner.Scanner, error) {
+		return scanner.NewEvmScanner(chain, db, &chainCfg)
 	})
-	a.scannerMgr.RegisterDriver("tron", func(chain model.Chain, db *gorm.DB, cfg *config.Config) scanner.Scanner {
-		nodeCfg := cfg.Chains[chain]
-		return scanner.NewTronScanner(db, &nodeCfg)
+	a.scannerMgr.RegisterDriver("tron", func(chain model.Chain, db *gorm.DB, chainCfg config.ChainNodeConfig) (scanner.Scanner, error) {
+		return scanner.NewTronScanner(db, &chainCfg)
 	})
-	a.scannerMgr.RegisterDriver("solana", func(chain model.Chain, db *gorm.DB, cfg *config.Config) scanner.Scanner {
-		nodeCfg := cfg.Chains[chain]
-		return scanner.NewSolanaScanner(db, &nodeCfg)
+	a.scannerMgr.RegisterDriver("solana", func(chain model.Chain, db *gorm.DB, chainCfg config.ChainNodeConfig) (scanner.Scanner, error) {
+		return scanner.NewSolanaScanner(db, &chainCfg)
 	})
 
 	a.scannerMgr.RegisterFromConfig(a.cfg, a.db) // 关键：注册逻辑内聚到 scanner
+	// 4. 撮合引擎（注入链上收据二次核验，拦截假充值）
+	a.matcher = engine.NewMatcherEngine(a.db, a.cfg, a.dispatcher, a.scannerMgr.VerifyTransaction)
 	go a.runPipeline(ctx)
 
 	a.scannerMgr.StartAll(ctx, a.transferChan)
 
-	a.confirmWorker = queue.NewConfirmationWorker(a.db, a.cfg, a.dispatcher, a.scannerMgr.GetLatestBlock)
+	a.confirmWorker = queue.NewConfirmationWorker(a.db, a.cfg, a.dispatcher, a.scannerMgr.GetLatestBlock, a.scannerMgr.VerifyTransaction)
 	go a.confirmWorker.StartWorker(ctx, 2*time.Second)
 	a.cleaner = queue.NewIntentCleaner(a.db)
 	go a.cleaner.StartCleaner(ctx, 10*time.Second)
+	go a.dispatcher.StartRetryWorker(ctx, 3*time.Second)
 	// 5. HTTP
 	if err := a.startHTTP(); err != nil {
 		return err
@@ -93,6 +93,7 @@ func (a *App) runPipeline(ctx context.Context) {
 	defer a.wg.Done()
 
 	log.Println("[Pipeline] 交易处理消费者已就绪")
+	a.recoverUnmatchedTransfers(ctx)
 
 	for {
 		select {
@@ -122,6 +123,44 @@ func (a *App) runPipeline(ctx context.Context) {
 			metrics.SetPipelineQueueLength(len(a.transferChan))
 			a.safeProcess(transfer)
 		}
+	}
+}
+
+func (a *App) recoverUnmatchedTransfers(ctx context.Context) {
+	if a.db == nil {
+		return
+	}
+	var unmatched []model.ChainTransfer
+	since := time.Now().Add(-48 * time.Hour)
+	err := a.db.WithContext(ctx).
+		Where("(matched_order_id = '' OR matched_order_id IS NULL) AND created_at >= ?", since).
+		Order("id ASC").
+		Limit(200).
+		Find(&unmatched).Error
+
+	if err != nil || len(unmatched) == 0 {
+		return
+	}
+
+	log.Printf("[Pipeline Recovery] 发现 %d 笔历史未撮合流水，开始自动重试撮合...", len(unmatched))
+	for _, tr := range unmatched {
+		a.safeReprocess(tr)
+	}
+}
+
+func (a *App) safeReprocess(t model.ChainTransfer) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC RECOVER] 重试撮合历史转账失败: %v, 数据: %+v", r, t)
+		}
+	}()
+
+	currentBlock := a.scannerMgr.GetLatestBlock(t.Chain)
+	if currentBlock < t.BlockNumber {
+		currentBlock = t.BlockNumber
+	}
+	if err := a.matcher.ReprocessUnmatchedTransfer(t, currentBlock); err != nil {
+		log.Printf("[Matcher Recovery] 重试撮合历史转账失败: %v, Tx=%s", err, t.TxHash)
 	}
 }
 

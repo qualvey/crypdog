@@ -55,3 +55,22 @@ func NormalizeChain(rawChain string) Chain {
 	}
 }
 
+type CryptoTokenOption struct {
+	Symbol string `json:"symbol"`
+	Name   string `json:"name"`
+	Icon   string `json:"icon"`
+}
+
+type CryptoChainOption struct {
+	Chain    Chain  `json:"chain"`
+	Name     string `json:"name"`
+	Badge    string `json:"badge,omitempty"`
+	Decimals int    `json:"decimals"`
+}
+
+type CryptoPaymentOptions struct {
+	Tokens       []CryptoTokenOption            `json:"tokens"`
+	Chains       map[string][]CryptoChainOption `json:"chains"`
+	DefaultToken string                         `json:"defaultToken"`
+	DefaultChain string                         `json:"defaultChain"`
+}

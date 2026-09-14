@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,7 +12,6 @@ import (
 	"crypdog/internal/config"
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
-	"crypdog/internal/queue"
 
 	"github.com/shopspring/decimal"
 
@@ -22,22 +22,31 @@ import (
 type WebhookDispatcher interface {
 	DispatchAsync(intent *model.PaymentIntent, txHash string, timestamp int64)
 }
+
+type TxVerifierFunc func(ctx context.Context, chain model.Chain, txHash string, blockNumber uint64) (bool, error)
+
 type MatcherEngine struct {
 	db         *gorm.DB
 	cfg        *config.Config
 	dispatcher WebhookDispatcher
+	txVerifier TxVerifierFunc
 	mu         sync.Mutex
 }
 
-func NewMatcherEngine(db *gorm.DB, cfg *config.Config, dispatcher *queue.WebhookDispatcher) *MatcherEngine {
+func NewMatcherEngine(db *gorm.DB, cfg *config.Config, dispatcher WebhookDispatcher, txVerifier ...TxVerifierFunc) *MatcherEngine {
+	var verifier TxVerifierFunc
+	if len(txVerifier) > 0 {
+		verifier = txVerifier[0]
+	}
 	return &MatcherEngine{
 		db:         db,
 		cfg:        cfg,
 		dispatcher: dispatcher,
+		txVerifier: verifier,
 	}
 }
 
-// 统一对外入口：只负责编排流程
+// ProcessTransfer 统一对外入口：只负责编排新扫描到的链上流水
 func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlockNumber uint64) error {
 	if strings.TrimSpace(transfer.TxHash) == "" || transfer.Amount.LessThanOrEqual(decimal.Zero) {
 		return errors.New("invalid transfer parameters")
@@ -55,21 +64,46 @@ func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlo
 		// 显式直接返回 nil，语义清晰：已存在流水安全忽略，不再向下撮合
 		return nil
 	}
-	// 2. 查询候选订单
-	intents, err := e.queryCandidateIntents(transfer)
-	if err != nil || len(intents) == 0 {
+
+	return e.matchAndSettle(&transfer, currentBlockNumber)
+}
+
+// ReprocessUnmatchedTransfer 专门用于服务启动时或补偿扫描已落库但未撮合的历史流水
+func (e *MatcherEngine) ReprocessUnmatchedTransfer(transfer model.ChainTransfer, currentBlockNumber uint64) error {
+	if strings.TrimSpace(transfer.TxHash) == "" || transfer.Amount.LessThanOrEqual(decimal.Zero) {
+		return errors.New("invalid transfer parameters")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.matchAndSettle(&transfer, currentBlockNumber)
+}
+
+func (e *MatcherEngine) matchAndSettle(transfer *model.ChainTransfer, currentBlockNumber uint64) error {
+	// 2. 查询候选订单 (仅 WATCHING 状态订单，CONFIRMING 不受新流水抢占)
+	intents, err := e.queryCandidateIntents(*transfer)
+	var matchedIntent *model.PaymentIntent
+	if err == nil && len(intents) > 0 {
+		matchedIntent = e.findMatchedIntent(intents, transfer.Amount)
+	}
+
+	// 2.1 迟到入账挽回 (Late Payment Recovery)：若活跃订单未匹配，查找近期超时的 EXPIRED 订单
+	if matchedIntent == nil {
+		expiredIntents, expErr := e.queryExpiredCandidateIntents(*transfer)
+		if expErr == nil && len(expiredIntents) > 0 {
+			matchedIntent = e.findMatchedIntent(expiredIntents, transfer.Amount)
+			if matchedIntent != nil {
+				log.Printf("[Matcher] ⏰ 捕获超时迟到充值订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
+					matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
+			}
+		}
+	}
+
+	if matchedIntent == nil {
 		metrics.RecordTransferMatch(string(transfer.Chain), false)
 		log.Printf("[Matcher] 未找到匹配候选意向: Chain=%s, Token=%s, To=%s, Amount=%s, Tx=%s",
 			transfer.Chain, transfer.Token, transfer.TargetAddress, transfer.Amount.String(), transfer.TxHash)
-		return err
-	}
-
-	// 3. 纯内存计算：匹配尾数
-	matchedIntent := e.findMatchedIntent(intents, transfer.Amount)
-	if matchedIntent == nil {
-		metrics.RecordTransferMatch(string(transfer.Chain), false)
-		log.Printf("[Matcher] 金额不匹配候选意向: Tx=%s, Amount=%s, 候选订单数=%d",
-			transfer.TxHash, transfer.Amount.String(), len(intents))
 		return nil
 	}
 
@@ -78,7 +112,7 @@ func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlo
 		matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
 
 	// 4. 状态推进与结算（事务 + 触发通知）
-	return e.settle(matchedIntent, &transfer, currentBlockNumber)
+	return e.settle(matchedIntent, transfer, currentBlockNumber)
 }
 func (e *MatcherEngine) recordTransferIfNotExists(transfer *model.ChainTransfer) (bool, error) {
 	// 依赖 DB 复合唯一索引: idx_chain_tx_log (chain, tx_hash, log_index)
@@ -130,6 +164,19 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 	intent.UpdatedAt = now
 
 	isPaid := confirmations >= required
+	if isPaid && e.txVerifier != nil && !strings.HasPrefix(transfer.TxHash, "mock_") {
+		verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		valid, err := e.txVerifier(verifyCtx, transfer.Chain, transfer.TxHash, transfer.BlockNumber)
+		cancel()
+		if err != nil {
+			log.Printf("[Matcher] ⚠️ 快速确认二次核验交易失败(RPC抖动暂不推进为PAID，交由ConfirmationWorker重试): tx=%s, err=%v", transfer.TxHash, err)
+			isPaid = false
+		} else if !valid {
+			log.Printf("[Matcher ALARM] 🚨 拦截链上假充值/已Revert交易: Order=%s, Tx=%s, Chain=%s", intent.OrderID, transfer.TxHash, transfer.Chain)
+			return fmt.Errorf("transaction verification failed: invalid or reverted tx %s", transfer.TxHash)
+		}
+	}
+
 	if isPaid {
 		intent.Status = model.StatusPaid
 		intent.PaidAt = &now
@@ -161,26 +208,51 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 
 	return nil
 }
-func (e *MatcherEngine) queryCandidateIntents(transfer model.ChainTransfer) ([]model.PaymentIntent, error) {
-	tokens := []model.Token{transfer.Token}
-	// 支持 USDT 与 USDC 等价稳定币互通撮合
-	if transfer.Token == model.TokenUSDT {
-		tokens = append(tokens, model.TokenUSDC)
-	} else if transfer.Token == model.TokenUSDC {
-		tokens = append(tokens, model.TokenUSDT)
-	}
 
+func (e *MatcherEngine) queryCandidateIntents(transfer model.ChainTransfer) ([]model.PaymentIntent, error) {
 	normAddr := transfer.Chain.NormalizeAddress(transfer.TargetAddress)
+
+	// 时间戳安全约束：链上转账只能撮合创建时间早于或相近于该交易的订单（允许 180s 时钟容差）
+	// 彻底杜绝使用刚创建的新订单白嫖以前的历史未认领流水 (Time-travel / Theft attack)
+	maxCreatedAt := time.Now().Add(180 * time.Second)
+	if transfer.BlockTimestamp > 0 {
+		maxCreatedAt = time.Unix(transfer.BlockTimestamp, 0).Add(180 * time.Second)
+	}
 
 	var intents []model.PaymentIntent
 	err := e.db.Where(
-		"status IN (?, ?) AND chain = ? AND token IN (?) AND (target_address = ? OR LOWER(target_address) = ?)",
+		"status = ? AND chain = ? AND token = ? AND (target_address = ? OR LOWER(target_address) = ?) AND created_at <= ?",
 		model.StatusWatching,
-		model.StatusConfirming,
 		transfer.Chain,
-		tokens,
+		transfer.Token,
 		normAddr,
 		strings.ToLower(normAddr),
+		maxCreatedAt,
 	).Find(&intents).Error
 	return intents, err
 }
+
+func (e *MatcherEngine) queryExpiredCandidateIntents(transfer model.ChainTransfer) ([]model.PaymentIntent, error) {
+	normAddr := transfer.Chain.NormalizeAddress(transfer.TargetAddress)
+
+	// 仅查找 24 小时内超时的订单，避免无限期匹配历史老单
+	since := time.Now().Add(-24 * time.Hour)
+	maxCreatedAt := time.Now().Add(180 * time.Second)
+	if transfer.BlockTimestamp > 0 {
+		maxCreatedAt = time.Unix(transfer.BlockTimestamp, 0).Add(180 * time.Second)
+	}
+
+	var intents []model.PaymentIntent
+	err := e.db.Where(
+		"status = ? AND chain = ? AND token = ? AND (target_address = ? OR LOWER(target_address) = ?) AND expires_at >= ? AND created_at <= ?",
+		model.StatusExpired,
+		transfer.Chain,
+		transfer.Token,
+		normAddr,
+		strings.ToLower(normAddr),
+		since,
+		maxCreatedAt,
+	).Find(&intents).Error
+	return intents, err
+}
+

@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,10 +21,43 @@ import (
 
 // 1. 结构体扁平定义，各链自给自足
 type TronScanner struct {
-	db          *gorm.DB
-	Cfg         config.ChainNodeConfig
-	latestBlock atomic.Uint64
-	client      *http.Client
+	db             *gorm.DB
+	Cfg            config.ChainNodeConfig
+	latestBlock    atomic.Uint64
+	client         *http.Client
+	tokensMu       sync.RWMutex
+	tokens         map[string]model.TokenSpec
+	tsMu           sync.RWMutex
+	lastTimestamps map[string]int64 // address -> last seen timestamp in milliseconds
+}
+
+// 预置已知的 TRON 知名代币（防空投垃圾币、投毒币）
+var defaultTronTokens = []model.TokenSpec{
+	{
+		Symbol:     "USDT",
+		Identifier: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+		Decimals:   6,
+		IsNative:   false,
+	},
+	{
+		Symbol:     "USDC",
+		Identifier: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8",
+		Decimals:   6,
+		IsNative:   false,
+	},
+}
+
+// SupportedTokens implements [Scanner].
+func (t *TronScanner) SupportedTokens() []model.TokenSpec {
+	t.tokensMu.RLock()
+	defer t.tokensMu.RUnlock()
+
+	// 返回 map 的值切片（即 []model.TokenSpec）
+	result := make([]model.TokenSpec, 0, len(t.tokens))
+	for _, spec := range t.tokens {
+		result = append(result, spec)
+	}
+	return result
 }
 
 type TronTRC20Tx struct {
@@ -47,7 +81,7 @@ type TronTRC20Resp struct {
 	Success bool          `json:"success"`
 }
 
-func NewTronScanner(db *gorm.DB, nodeCfg *config.ChainNodeConfig) Scanner {
+func NewTronScanner(db *gorm.DB, nodeCfg *config.ChainNodeConfig) (Scanner, error) {
 
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
@@ -57,11 +91,39 @@ func NewTronScanner(db *gorm.DB, nodeCfg *config.ChainNodeConfig) Scanner {
 			IdleConnTimeout:     90 * time.Second,
 		},
 	}
-	return &TronScanner{
-		db:     db,
-		Cfg:    *nodeCfg,
-		client: httpClient,
+	scanner := &TronScanner{
+		db:             db,
+		Cfg:            *nodeCfg,
+		client:         httpClient,
+		tokens:         make(map[string]model.TokenSpec),
+		lastTimestamps: make(map[string]int64),
 	}
+	// 1. 装载 TRX 原生代币
+	scanner.tokens["TRX"] = model.TokenSpec{
+		Symbol:     "TRX",
+		Identifier: "",
+		Decimals:   6,
+		IsNative:   true,
+	}
+	// 2. 装配系统预置的知名 TRC20 代币
+	for _, spec := range defaultTronTokens {
+		scanner.tokens[spec.Identifier] = spec
+	}
+
+	// 3. 外部注入：从 Cfg.Tokens 读取用户在 YAML 中自定义或覆盖的代币
+	for _, t := range nodeCfg.Tokens {
+		trimmedAddr := strings.TrimSpace(t.Identifier)
+		if trimmedAddr == "" {
+			continue
+		}
+		scanner.tokens[trimmedAddr] = model.TokenSpec{
+			Symbol:     t.Symbol,
+			Identifier: trimmedAddr, // TRON Base58 严格区分大小写，严禁 ToLower
+			Decimals:   t.Decimals,
+			IsNative:   false,
+		}
+	}
+	return scanner, nil
 }
 
 func (t *TronScanner) Chain() model.Chain {
@@ -163,18 +225,19 @@ func (t *TronScanner) scanActiveTronAddresses(ctx context.Context, transferChan 
 		return
 	}
 
-	var activeIntents []model.PaymentIntent
+	// 常态化监控平台所有已启用的 TRON 收款钱包地址池，不依赖临时 WATCHING 意向
+	var activeWallets []model.WalletAddress
 	err := t.db.WithContext(ctx).
-		Where("status = ? AND UPPER(chain) = ?", model.StatusWatching, model.ChainTron).
-		Find(&activeIntents).Error
-	if err != nil || len(activeIntents) == 0 {
+		Where("(chain = ? OR UPPER(chain) = ?) AND enabled = ?", model.ChainTron, "TRON", true).
+		Find(&activeWallets).Error
+	if err != nil || len(activeWallets) == 0 {
 		return
 	}
 
 	// Address deduplication
 	addressMap := make(map[string]bool)
-	for _, intent := range activeIntents {
-		addr := strings.TrimSpace(intent.TargetAddress)
+	for _, w := range activeWallets {
+		addr := strings.TrimSpace(w.Address)
 		if addr != "" {
 			addressMap[addr] = true
 		}
@@ -194,7 +257,34 @@ func (t *TronScanner) scanActiveTronAddresses(ctx context.Context, transferChan 
 	}
 }
 func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr string, transferChan chan<- model.ChainTransfer) {
-	url := fmt.Sprintf("%s/v1/accounts/%s/transactions/trc20?limit=20&only_to=true", baseURL, addr)
+	t.tsMu.RLock()
+	lastTs := t.lastTimestamps[addr]
+	t.tsMu.RUnlock()
+
+	// 若尚未缓存水位线，尝试从 DB 恢复
+	if lastTs == 0 && t.db != nil {
+		var lastTransfer model.ChainTransfer
+		if err := t.db.WithContext(ctx).
+			Where("chain = ? AND target_address = ?", model.ChainTron, addr).
+			Order("block_timestamp DESC").First(&lastTransfer).Error; err == nil && lastTransfer.BlockTimestamp > 0 {
+			lastTs = lastTransfer.BlockTimestamp * 1000 // 转为毫秒
+			t.tsMu.Lock()
+			t.lastTimestamps[addr] = lastTs
+			t.tsMu.Unlock()
+		} else {
+			// 冷启动保护：若无任何历史记录，从当前时间前 30 分钟起开始增量扫描，防止拉取远古陈旧流水
+			lastTs = time.Now().Add(-30 * time.Minute).UnixMilli()
+			t.tsMu.Lock()
+			t.lastTimestamps[addr] = lastTs
+			t.tsMu.Unlock()
+		}
+	}
+
+	url := fmt.Sprintf("%s/v1/accounts/%s/transactions/trc20?limit=50&only_to=true", baseURL, addr)
+	if lastTs > 0 {
+		url = fmt.Sprintf("%s&min_timestamp=%d", url, lastTs)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return
@@ -209,6 +299,12 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		log.Printf("[TronScanner] ⚠️ 触发 TronGrid API 限流 (429 Too Many Requests)，本周期等待退避")
+		metrics.RecordScanError(string(model.ChainTron), "rate_limit")
+		return
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return
 	}
@@ -218,14 +314,35 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		return
 	}
 
+	var maxTs int64 = lastTs
+	txCountMap := make(map[string]int64)
+
 	for _, tx := range trcResp.Data {
 		if !strings.EqualFold(tx.To, addr) {
 			continue
 		}
 
-		decimals := tx.TokenInfo.Decimals
-		if decimals == 0 {
-			decimals = 6 // Default USDT decimals on TRON is 6
+		if tx.BlockTimestamp > maxTs {
+			maxTs = tx.BlockTimestamp
+		}
+
+		// 严格核验 TRC-20 合约地址（防假币 / 投毒币攻击）
+		contractAddr := strings.TrimSpace(tx.TokenInfo.Address)
+		t.tokensMu.RLock()
+		spec, isKnown := t.tokens[contractAddr]
+		t.tokensMu.RUnlock()
+		if !isKnown {
+			log.Printf("[TronScanner Security] 拦截非白名单或伪造代币: Contract=%s, FakeSymbol=%s, Tx=%s, To=%s",
+				contractAddr, tx.TokenInfo.Symbol, tx.TransactionID, tx.To)
+			continue
+		}
+
+		decimals := int32(spec.Decimals)
+		if decimals <= 0 {
+			decimals = tx.TokenInfo.Decimals
+			if decimals <= 0 {
+				decimals = 6
+			}
 		}
 
 		// 使用 decimal 无损高精度计算，防止大额资金丢精度
@@ -235,13 +352,20 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		}
 		amount := valDec.Div(decimal.New(1, decimals))
 
+		logIdx := txCountMap[tx.TransactionID]
+		txCountMap[tx.TransactionID]++
+
 		transfer := model.ChainTransfer{
 			TxHash:         tx.TransactionID,
 			Chain:          model.ChainTron,
+			LogIndex:       logIdx,
+			Contract:       contractAddr,
 			FromAddress:    tx.From,
 			TargetAddress:  tx.To,
 			Amount:         amount,
-			Token:          tx.TokenInfo.Symbol,
+			RawValue:       tx.Value,
+			Token:          spec.Symbol, // 使用白名单中权威核验的 Symbol
+			Decimals:       uint8(decimals),
 			BlockNumber:    tx.BlockNumber,
 			BlockTimestamp: tx.BlockTimestamp / 1000,
 		}
@@ -252,6 +376,53 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 			metrics.RecordTransferCaptured(string(model.ChainTron), string(transfer.Token))
 		}
 	}
+
+	if maxTs > lastTs {
+		t.tsMu.Lock()
+		t.lastTimestamps[addr] = maxTs
+		t.tsMu.Unlock()
+	}
+}
+
+// VerifyTransaction 二次核验 TRON 交易是否在主链成功确认且执行成功
+func (t *TronScanner) VerifyTransaction(ctx context.Context, txHash string, blockNumber uint64) (bool, error) {
+	url := fmt.Sprintf("%s/wallet/gettransactionbyid", strings.TrimRight(t.Cfg.RPCURL, "/"))
+	reqBody := fmt.Sprintf(`{"value":"%s"}`, txHash)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(reqBody))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if t.Cfg.APIKey != "" {
+		req.Header.Set("TRON-PRO-API-KEY", t.Cfg.APIKey)
+	}
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("tron api error: status %d", resp.StatusCode)
+	}
+
+	var txInfo struct {
+		TxID string `json:"txID"`
+		Ret  []struct {
+			ContractRet string `json:"contractRet"`
+		} `json:"ret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&txInfo); err != nil {
+		return false, err
+	}
+	if txInfo.TxID == "" {
+		return false, nil // 交易不存在或已遭孤儿块回滚
+	}
+	if len(txInfo.Ret) > 0 && txInfo.Ret[0].ContractRet != "SUCCESS" {
+		return false, nil // 交易未执行成功
+	}
+	return true, nil
 }
 
 // SimulateTransfer 模拟触发一笔 TRC-20 充值事件（仅供本地开发联调、单测或 Webhook 验证）

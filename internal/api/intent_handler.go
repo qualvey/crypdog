@@ -3,14 +3,15 @@ package api
 import (
 	"crypdog/internal/model"
 	"crypdog/internal/service"
+	"crypdog/internal/signature"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -65,15 +66,58 @@ func (h *IntentHandler) RegisterIntent(c *gin.Context) {
 		})
 		return
 	}
+
+	// 校验 Webhook URL 防御 SSRF（生产环境默认严禁私网/回环地址）
+	allowLocal := h.cfg != nil && h.cfg.Webhook.AllowLocal
+	if err := signature.ValidateWebhookURL(req.WebhookURL, allowLocal); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("Invalid webhookUrl: %v", err),
+		})
+		return
+	}
+
+	// 校验目标收款钱包地址合法性（EVM, TRON, Solana 等）
+	if err := signature.ValidateChainAddress(string(req.Chain), req.TargetAddress); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("Invalid targetAddress: %v", err),
+		})
+		return
+	}
+
+	normChain := model.NormalizeChain(string(req.Chain))
+
+	// 校验收款地址是否属于本微服务已配置并启用的平台收款钱包池
+	if h.db != nil {
+		cleanTarget := normChain.NormalizeAddress(req.TargetAddress)
+		var totalWallets int64
+		_ = h.db.Model(&model.WalletAddress{}).Where("chain = ? OR chain = ?", normChain, req.Chain).Count(&totalWallets)
+		if totalWallets > 0 {
+			var walletCount int64
+			err := h.db.Model(&model.WalletAddress{}).
+				Where("(chain = ? OR chain = ?) AND enabled = ? AND (address = ? OR LOWER(address) = ?)",
+					normChain, req.Chain, true, cleanTarget, strings.ToLower(cleanTarget)).
+				Count(&walletCount).Error
+			if err == nil && walletCount == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"code":    400,
+					"message": fmt.Sprintf("Target address '%s' is not in the configured platform wallet pool for chain %s", req.TargetAddress, req.Chain),
+				})
+				return
+			}
+		}
+	}
+
 	// 基础参数兜底
 	dto := service.RegisterDTO{
 		OrderID:        strings.TrimSpace(req.OrderID),
-		Chain:          model.NormalizeChain(string(req.Chain)),
+		Chain:          normChain,
 		Token:          req.Token,
 		TargetAddress:  strings.TrimSpace(req.TargetAddress),
 		ExpectedAmount: req.ExpectedAmount,
 		TimeoutSeconds: normalizeTimeout(req.TimeoutSeconds),
-		WebhookURL:     req.WebhookURL,
+		WebhookURL:     strings.TrimSpace(req.WebhookURL),
 	}
 
 	intent, isIdempotent, err := h.intentService.RegisterOrReactivate(dto)
@@ -117,95 +161,56 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		return
 	}
 
-	if h.poolManager == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "MicroAmountManager pool is not configured",
+	// 校验 Webhook URL 防御 SSRF（生产环境默认严禁私网/回环地址）
+	allowLocal := h.cfg != nil && h.cfg.Webhook.AllowLocal
+	if err := signature.ValidateWebhookURL(req.WebhookURL, allowLocal); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("Invalid webhookUrl: %v", err),
 		})
 		return
 	}
 
-	// 1. Check if orderId already exists
-	var existing model.PaymentIntent
-	if err := h.db.Where("order_id = ?", req.OrderID).First(&existing).Error; err == nil {
-		if existing.Status == model.StatusPaid {
+	dto := service.AllocateDTO{
+		OrderID:        strings.TrimSpace(req.OrderID),
+		Chain:          req.Chain,
+		Token:          req.Token,
+		BaseAmount:     req.BaseAmount,
+		TimeoutSeconds: normalizeTimeout(req.TimeoutSeconds),
+		WebhookURL:     strings.TrimSpace(req.WebhookURL),
+	}
+
+	intent, tailOffset, isIdempotent, err := h.intentService.AllocateOrReactivate(dto)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrOrderAlreadyPaid):
 			c.JSON(http.StatusConflict, gin.H{
 				"code":    409,
 				"message": fmt.Sprintf("Order ID '%s' has already been PAID.", req.OrderID),
 			})
-			return
-		}
-
-		if existing.Status == model.StatusWatching || existing.Status == model.StatusConfirming {
-			tail := existing.ExpectedAmount.Sub(req.BaseAmount)
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"message": "Payment intent already active (Idempotent response)",
-				"data": gin.H{
-					"intentId":       existing.ID,
-					"orderId":        existing.OrderID,
-					"baseAmount":     req.BaseAmount,
-					"tailOffset":     tail,
-					"expectedAmount": existing.ExpectedAmount,
-					"status":         existing.Status,
-					"expiresAt":      existing.ExpiresAt,
-				},
+		default:
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    409,
+				"message": fmt.Sprintf("Failed to allocate micro-amount: %v", err),
 			})
-			return
 		}
-	}
-
-	normChain := model.NormalizeChain(string(req.Chain))
-
-	// 2. Allocate unique micro-amount
-	targetAddress, allocatedAmount, err := h.poolManager.AllocateUniqueAmount(normChain, model.Token(req.Token), req.BaseAmount)
-	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{
-			"code":    409,
-			"message": fmt.Sprintf("Failed to allocate micro-amount: %v", err),
-		})
 		return
 	}
 
-	tailOffset := allocatedAmount.Sub(req.BaseAmount)
-
-	intentID := fmt.Sprintf("intent_%s_%s", normChain, uuid.New().String()[:8])
-	now := time.Now()
-	timeoutSec := normalizeTimeout(req.TimeoutSeconds)
-	expiresAt := now.Add(time.Duration(timeoutSec) * time.Second)
-
-	intent := model.PaymentIntent{
-		ID:             intentID,
-		OrderID:        req.OrderID,
-		Chain:          normChain,
-		Token:          req.Token,
-		TargetAddress:  normChain.NormalizeAddress(targetAddress),
-		ExpectedAmount: allocatedAmount,
-		TimeoutSeconds: timeoutSec,
-		WebhookURL:     req.WebhookURL,
-		Status:         model.StatusWatching,
-		ExpiresAt:      expiresAt,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-
-	if err := h.db.Create(&intent).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": fmt.Sprintf("Failed to create allocated payment intent: %v", err),
-		})
-		return
+	msg := "Payment intent allocated and watching successfully"
+	if isIdempotent {
+		msg = "Payment intent already active (Idempotent response)"
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
-		"message": "Payment intent allocated and watching successfully",
+		"message": msg,
 		"data": gin.H{
 			"intentId":       intent.ID,
 			"orderId":        intent.OrderID,
 			"baseAmount":     req.BaseAmount,
 			"tailOffset":     tailOffset,
-			"expectedAmount": allocatedAmount,
+			"expectedAmount": intent.ExpectedAmount,
 			"targetAddress":  intent.TargetAddress,
 			"status":         intent.Status,
 			"expiresAt":      intent.ExpiresAt,
@@ -258,10 +263,10 @@ func (h *IntentHandler) GetIntentStatus(c *gin.Context) {
 }
 
 type SimulateReq struct {
-	TargetAddress string  `json:"targetAddress" binding:"required"`
-	Amount        float64 `json:"amount" binding:"required"`
-	Chain         string  `json:"chain"`
-	Token         string  `json:"token"`
+	TargetAddress string          `json:"targetAddress" binding:"required"`
+	Amount        decimal.Decimal `json:"amount" binding:"required"`
+	Chain         string          `json:"chain"`
+	Token         string          `json:"token"`
 }
 
 // SimulateOnChainTransfer handles POST /api/v1/watcher/intents/simulate
@@ -272,26 +277,50 @@ func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
 		return
 	}
 
-	chain := strings.ToUpper(req.Chain)
-	if chain == "" {
-		chain = "TRON"
+	chain := model.NormalizeChain(req.Chain)
+	token := model.Token(strings.ToUpper(strings.TrimSpace(req.Token)))
+	if token == "" {
+		token = model.TokenUSDT
 	}
 
-	var txHash string
-	txHash, err := h.scannerMgr.SimulateTransfer(chain, req.TargetAddress, req.Amount, req.Token, h.transferChan)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+	txHash := fmt.Sprintf("mock_tx_%x%d", rand.Uint64(), time.Now().UnixNano())
+	latestBlock := h.scannerMgr.GetLatestBlock(chain)
+	if latestBlock == 0 {
+		latestBlock = 10000000
+	}
+
+	transfer := model.ChainTransfer{
+		TxHash:         txHash,
+		Chain:          chain,
+		FromAddress:    "0xSimulatedPayerWalletAddress1234567890",
+		TargetAddress:  chain.NormalizeAddress(req.TargetAddress),
+		Amount:         req.Amount,
+		Token:          token,
+		BlockNumber:    latestBlock,
+		BlockTimestamp: time.Now().Unix(),
+		Decimals:       6,
+	}
+
+	if h.transferChan == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Transfer channel not initialized"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "Simulated transfer broadcasted to scanner pipeline",
-		"data": gin.H{
-			"txHash": txHash,
-			"chain":  chain,
-			"amount": req.Amount,
-		},
-	})
+
+	select {
+	case h.transferChan <- transfer:
+		c.JSON(http.StatusOK, gin.H{
+			"code":    200,
+			"message": "Simulated transfer broadcasted to scanner pipeline",
+			"data": gin.H{
+				"txHash": txHash,
+				"chain":  chain,
+				"amount": req.Amount,
+				"token":  token,
+			},
+		})
+	default:
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 503, "message": "Pipeline transfer queue full"})
+	}
 }
 
 type CancelIntentReq struct {
@@ -334,7 +363,7 @@ func (h *IntentHandler) CancelIntent(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrIntentNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": err.Error()})
-		case errors.Is(err, service.ErrCannotCancelPaid):
+		case errors.Is(err, service.ErrCannotCancelPaid), errors.Is(err, service.ErrCannotCancelConfirming):
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
@@ -350,5 +379,208 @@ func (h *IntentHandler) CancelIntent(c *gin.Context) {
 			"orderId":  intent.OrderID,
 			"status":   intent.Status,
 		},
+	})
+}
+
+// GetPaymentOptions 根据当前启用的公链配置与可用收款地址池，动态产出可供前端展示的 Tokens 与 Chains
+func (h *IntentHandler) GetPaymentOptions(c *gin.Context) {
+	// 1. 查询数据库中启用的收款地址
+	var wallets []model.WalletAddress
+	if err := h.db.Where("enabled = ?", true).Find(&wallets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "查询收款地址失败"})
+		return
+	}
+
+	// 统计拥有有效收款钱包的公链
+	activeChainsWithWallet := make(map[string]bool)
+	for _, w := range wallets {
+		norm := model.NormalizeChain(string(w.Chain))
+		activeChainsWithWallet[string(norm)] = true
+	}
+
+	// 2. 结合 config.yaml 中的节点启用状态过滤
+	availableChains := make(map[string]bool)
+	if h.cfg != nil && len(h.cfg.Chains) > 0 {
+		for chain, nodeCfg := range h.cfg.Chains {
+			if nodeCfg.Enabled == nil || *nodeCfg.Enabled {
+				norm := string(model.NormalizeChain(string(chain)))
+				if activeChainsWithWallet[norm] {
+					availableChains[norm] = true
+				}
+			}
+		}
+	} else {
+		availableChains = activeChainsWithWallet
+	}
+
+	// 3. 产出结构化响应
+	options := model.CryptoPaymentOptions{
+		Tokens: []model.CryptoTokenOption{},
+		Chains: make(map[string][]model.CryptoChainOption),
+	}
+
+	if len(availableChains) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"data": options,
+		})
+		return
+	}
+
+	tokenMeta := map[string]model.CryptoTokenOption{
+		"USDT": {Symbol: "USDT", Name: "Tether USD", Icon: "fa-solid fa-circle-dollar-to-slot"},
+		"USDC": {Symbol: "USDC", Name: "USD Coin", Icon: "fa-solid fa-circle-dollar-to-slot"},
+		"BTC":  {Symbol: "BTC", Name: "Bitcoin", Icon: "fa-brands fa-bitcoin"},
+		"ETH":  {Symbol: "ETH", Name: "Ethereum", Icon: "fa-brands fa-ethereum"},
+		"BNB":  {Symbol: "BNB", Name: "BNB", Icon: "fa-solid fa-coins"},
+		"SOL":  {Symbol: "SOL", Name: "Solana", Icon: "fa-solid fa-sun"},
+	}
+
+	chainMeta := map[model.Chain]struct {
+		name  string
+		badge string
+	}{
+		model.ChainTron:     {name: "TRC20 (Tron)", badge: "低手续费 / 推荐"},
+		model.ChainArbitrum: {name: "Arbitrum One (L2)", badge: "极速 / 低Gas"},
+		model.ChainBsc:      {name: "BNB Smart Chain", badge: "高吞吐"},
+		model.ChainEth:      {name: "ERC20 (Ethereum)", badge: "主网原生"},
+		model.ChainPolygon:  {name: "Polygon (Matic)", badge: "低费率"},
+		model.ChainSolana:   {name: "Solana", badge: "极速"},
+	}
+
+	type chainDecimals struct {
+		chain    model.Chain
+		decimals int
+	}
+
+	// 各代币支持的链与精度矩阵
+	tokenChainMap := map[string][]chainDecimals{
+		"USDT": {
+			{chain: model.ChainTron, decimals: 6},
+			{chain: model.ChainArbitrum, decimals: 6},
+			{chain: model.ChainBsc, decimals: 18},
+			{chain: model.ChainEth, decimals: 6},
+			{chain: model.ChainPolygon, decimals: 6},
+			{chain: model.ChainSolana, decimals: 6},
+		},
+		"USDC": {
+			{chain: model.ChainArbitrum, decimals: 6},
+			{chain: model.ChainTron, decimals: 6},
+			{chain: model.ChainBsc, decimals: 18},
+			{chain: model.ChainEth, decimals: 6},
+			{chain: model.ChainPolygon, decimals: 6},
+			{chain: model.ChainSolana, decimals: 6},
+		},
+		"ETH": {
+			{chain: model.ChainArbitrum, decimals: 18},
+			{chain: model.ChainEth, decimals: 18},
+		},
+		"SOL": {
+			{chain: model.ChainSolana, decimals: 9},
+		},
+		"BNB": {
+			{chain: model.ChainBsc, decimals: 18},
+		},
+	}
+
+	tokenPriority := []string{"USDT", "USDC", "ETH", "SOL", "BNB"}
+	for _, sym := range tokenPriority {
+		chainsForToken, ok := tokenChainMap[sym]
+		if !ok {
+			continue
+		}
+
+		var matchedChains []model.CryptoChainOption
+		for _, cd := range chainsForToken {
+			norm := string(model.NormalizeChain(string(cd.chain)))
+			if availableChains[norm] {
+				name := string(cd.chain)
+				badge := ""
+				if meta, exists := chainMeta[cd.chain]; exists {
+					name = meta.name
+					badge = meta.badge
+				}
+				matchedChains = append(matchedChains, model.CryptoChainOption{
+					Chain:    cd.chain,
+					Name:     name,
+					Badge:    badge,
+					Decimals: cd.decimals,
+				})
+			}
+		}
+
+		if len(matchedChains) > 0 {
+			tokOpt, ok := tokenMeta[sym]
+			if !ok {
+				tokOpt = model.CryptoTokenOption{
+					Symbol: sym,
+					Name:   sym,
+					Icon:   "fa-solid fa-coins",
+				}
+			}
+			options.Tokens = append(options.Tokens, tokOpt)
+			options.Chains[sym] = matchedChains
+		}
+	}
+
+	// 容错兜底：如果有自定义公链在 availableChains 中但未被任何预定义代币收录，自动加入 USDT 列表
+	for chainStr := range availableChains {
+		alreadyIncluded := false
+		if usdtChains, exists := options.Chains["USDT"]; exists {
+			for _, cOpt := range usdtChains {
+				if string(model.NormalizeChain(string(cOpt.Chain))) == chainStr {
+					alreadyIncluded = true
+					break
+				}
+			}
+		}
+		if !alreadyIncluded {
+			cChain := model.NormalizeChain(chainStr)
+			cName := string(cChain)
+			cBadge := ""
+			if meta, exists := chainMeta[cChain]; exists {
+				cName = meta.name
+				cBadge = meta.badge
+			}
+			cOpt := model.CryptoChainOption{
+				Chain:    cChain,
+				Name:     cName,
+				Badge:    cBadge,
+				Decimals: 18,
+			}
+			options.Chains["USDT"] = append(options.Chains["USDT"], cOpt)
+			// 确保 Tokens 中包含 USDT
+			hasUSDT := false
+			for _, t := range options.Tokens {
+				if t.Symbol == "USDT" {
+					hasUSDT = true
+					break
+				}
+			}
+			if !hasUSDT {
+				options.Tokens = append([]model.CryptoTokenOption{tokenMeta["USDT"]}, options.Tokens...)
+			}
+		}
+	}
+
+	// 计算默认选中的 Token 与 Chain
+	if len(options.Tokens) > 0 {
+		defaultToken := options.Tokens[0].Symbol
+		for _, t := range options.Tokens {
+			if t.Symbol == "USDT" {
+				defaultToken = "USDT"
+				break
+			}
+		}
+		options.DefaultToken = defaultToken
+
+		if chains, ok := options.Chains[defaultToken]; ok && len(chains) > 0 {
+			options.DefaultChain = string(chains[0].Chain)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": options,
 	})
 }

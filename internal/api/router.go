@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"io"
 	"log"
 	"net/http"
@@ -59,7 +60,12 @@ func SetupRouter(h *Handler) *gin.Engine {
 
 	// CORS Middleware
 	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
@@ -88,9 +94,25 @@ func SetupRouter(h *Handler) *gin.Engine {
 		r.GET(metricsPath, gin.WrapH(promhttp.Handler()))
 	}
 
-	// pprof Profiling 调试探针
+	// Service Authorization Middleware (使用常量时间比对防时序侧信道反推)
+	authMiddleware := func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		expectedToken := "Bearer " + h.cfg.Server.Secret
+		if len(authHeader) != len(expectedToken) || subtle.ConstantTimeCompare([]byte(authHeader), []byte(expectedToken)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "Unauthorized access: invalid or missing Service Secret Key",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+
+	// pprof Profiling 调试探针（必须增加鉴权保护）
 	if h.cfg.Pprof.Enabled {
 		pprofGroup := r.Group("/debug/pprof")
+		pprofGroup.Use(authMiddleware)
 		{
 			pprofGroup.GET("/", gin.WrapF(pprof.Index))
 			pprofGroup.GET("/cmdline", gin.WrapF(pprof.Cmdline))
@@ -105,21 +127,6 @@ func SetupRouter(h *Handler) *gin.Engine {
 			pprofGroup.GET("/mutex", gin.WrapH(pprof.Handler("mutex")))
 			pprofGroup.GET("/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
 		}
-	}
-
-	// Service Authorization Middleware
-	authMiddleware := func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		expectedToken := "Bearer " + h.cfg.Server.Secret
-		if authHeader == "" || authHeader != expectedToken {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Unauthorized access: invalid or missing Service Secret Key",
-			})
-			c.Abort()
-			return
-		}
-		c.Next()
 	}
 
 	// API v1 Routes
@@ -137,11 +144,14 @@ func SetupRouter(h *Handler) *gin.Engine {
 			protected.DELETE("/intents/:orderId", intentHandler.CancelIntent)
 			protected.GET("/transfers", transferHandler.GetTransfers)
 			protected.POST("/intents/simulate", intentHandler.SimulateOnChainTransfer)
+			protected.GET("/options", intentHandler.GetPaymentOptions)
+
 		}
 	}
 
-	// Mock Webhook Receiver Endpoint for testing/verifying callback signatures
-	r.POST("/api/v1/mock/webhook", func(c *gin.Context) {
+	// Mock Webhook Receiver Endpoint 仅在本地开发调试（AllowLocal 为 true）时挂载
+	if h.cfg.Webhook.AllowLocal {
+		r.POST("/api/v1/mock/webhook", func(c *gin.Context) {
 		sig := c.GetHeader("X-Signature-SHA256")
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
@@ -171,6 +181,7 @@ func SetupRouter(h *Handler) *gin.Engine {
 			"message": "Webhook received and signature verified successfully",
 		})
 	})
+	}
 
 	return r
 }

@@ -20,6 +20,7 @@ WORKDIR /root/
 
 COPY --from=builder /app/crypdog .
 COPY --from=builder /app/.env.example .env
+COPY --from=builder /app/config.yaml config.yaml
 
 EXPOSE 8080
 

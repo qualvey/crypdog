@@ -2,10 +2,15 @@ package queue
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"crypdog/internal/config"
@@ -36,12 +41,130 @@ type WebhookDispatcher struct {
 }
 
 func NewWebhookDispatcher(db *gorm.DB, cfg *config.Config) *WebhookDispatcher {
+	timeout := 10 * time.Second
+	if cfg != nil && cfg.Webhook.TimeoutSec > 0 {
+		timeout = time.Duration(cfg.Webhook.TimeoutSec) * time.Second
+	}
+
+	allowLocal := cfg != nil && cfg.Webhook.AllowLocal
+
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// 解析实际建立连接的目标 IP，在网络层彻底防范 SSRF 与 DNS Rebinding
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no ip addresses resolved for host: %s", host)
+			}
+
+			for _, ip := range ips {
+				if !allowLocal {
+					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || strings.HasPrefix(ip.String(), "169.254.") {
+						return nil, fmt.Errorf("SSRF protection: connection to restricted IP %s blocked", ip.String())
+					}
+				}
+			}
+
+			// 选择第一个合法 IP 建立物理 TCP 连接
+			targetAddr := net.JoinHostPort(ips[0].String(), port)
+			return dialer.DialContext(ctx, network, targetAddr)
+		},
+	}
+
 	return &WebhookDispatcher{
 		db:  db,
 		cfg: cfg,
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   timeout,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return errors.New("stopped after 5 redirects")
+				}
+				// 校验重定向目标 URL 防 SSRF 重定向绕过
+				return signature.ValidateWebhookURL(req.URL.String(), allowLocal)
+			},
 		},
+	}
+}
+
+// StartRetryWorker 周期性扫描数据库中投递失败且待重试的 WebhookLog，防止服务重启后内存重试任务丢失
+func (w *WebhookDispatcher) StartRetryWorker(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[WebhookRetryWorker] 收到退出信号，停止补偿重试")
+			return
+		case <-ticker.C:
+			w.retryPendingLogs(ctx)
+		}
+	}
+}
+
+func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[WebhookRetryWorker PANIC RECOVER]: %v", r)
+		}
+	}()
+
+	now := time.Now()
+	var pendingLogs []model.WebhookLog
+	since := now.Add(-2 * time.Hour)
+	err := w.db.WithContext(ctx).
+		Where("success = ? AND attempt < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ? AND created_at >= ?",
+			false, 5, now, since).
+		Order("id ASC").
+		Limit(20).
+		Find(&pendingLogs).Error
+	if err != nil || len(pendingLogs) == 0 {
+		return
+	}
+
+	for _, l := range pendingLogs {
+		var successCount int64
+		w.db.Model(&model.WebhookLog{}).Where("order_id = ? AND success = ?", l.OrderID, true).Count(&successCount)
+		if successCount > 0 {
+			w.db.Model(&l).Update("next_retry_at", nil)
+			continue
+		}
+
+		var payload WebhookPayload
+		if err := json.Unmarshal([]byte(l.Payload), &payload); err != nil {
+			w.db.Model(&l).Update("next_retry_at", nil)
+			continue
+		}
+
+		// 2. 原子清空 next_retry_at 抢占当前重试任务，防止并发惊群重复投递
+		res := w.db.Model(&model.WebhookLog{}).
+			Where("id = ? AND next_retry_at IS NOT NULL", l.ID).
+			Update("next_retry_at", nil)
+		if res.RowsAffected == 0 {
+			continue // 已被并发消费，跳过
+		}
+
+		log.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, NextAttempt=%d", l.OrderID, l.Attempt+1)
+		w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, l.Attempt+1)
 	}
 }
 
@@ -64,7 +187,7 @@ func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash st
 	}()
 }
 
-// DeliverWithRetry sends the payload and retries up to 5 times if necessary
+// DeliverWithRetry sends the payload and registers retry schedule in DB (handled exclusively by StartRetryWorker)
 func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload WebhookPayload, attempt int) {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -112,6 +235,15 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	}
 
 	webhookLog.Success = success
+
+	var nextDelay time.Duration
+	if !success && attempt < 5 {
+		backoffDurations := []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute}
+		nextDelay = backoffDurations[attempt-1]
+		nextRetryAt := time.Now().Add(nextDelay)
+		webhookLog.NextRetryAt = &nextRetryAt
+	}
+
 	w.db.Create(&webhookLog)
 
 	if success {
@@ -122,18 +254,11 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	log.Printf("[Webhook] Delivery failed for Order: %s (Status: %d, Attempt: %d)", orderID, webhookLog.StatusCode, attempt)
 
-	// Retry logic (Exponential backoff: 2s, 10s, 30s, 2m)
+	// 重试彻底收拢至 StartRetryWorker 单一持久化队列驱动，严禁在此启动 time.AfterFunc 导致双重触发
 	if attempt < 5 {
 		metrics.RecordWebhookDispatch("retry", durationSec)
-		backoffDurations := []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute}
-		nextDelay := backoffDurations[attempt-1]
-
-		nextRetryAt := time.Now().Add(nextDelay)
-		webhookLog.NextRetryAt = &nextRetryAt
-
-		time.AfterFunc(nextDelay, func() {
-			w.DeliverWithRetry(orderID, webhookURL, payload, attempt+1)
-		})
+		log.Printf("[Webhook] 订单 %s 投递失败，下一次重试将在 %v 后由持久化 Worker 统一驱动 (Attempt: %d)",
+			orderID, nextDelay, attempt+1)
 	} else {
 		metrics.RecordWebhookDispatch("max_retried", durationSec)
 		log.Printf("[Webhook] Exceeded max retries for Order: %s", orderID)

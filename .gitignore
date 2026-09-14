@@ -4,3 +4,4 @@ config.yaml
 /demo
 /dist
 *mermaid_test*
+*db-*

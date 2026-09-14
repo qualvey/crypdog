@@ -67,6 +67,37 @@ type EVMTransferEvent struct {
 	BlockNumber     int64
 }
 
+type EVMReceipt struct {
+	Status      string `json:"status"` // "0x1" 成功, "0x0" 失败
+	BlockNumber string `json:"blockNumber"`
+	BlockHash   string `json:"blockHash"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+}
+
+// GetTransactionReceipt 查询交易收据，用于二次核验交易是否最终打包成功及防重组
+func (c *EvmRPCClient) GetTransactionReceipt(ctx context.Context, txHash string) (*EVMReceipt, error) {
+	raw, err := c.doRPC(ctx, rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_getTransactionReceipt",
+		Params:  []interface{}{txHash},
+		ID:      3,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if string(raw) == "null" || len(raw) == 0 {
+		return nil, nil // 交易在主链不存在（未打包或已被回滚丢弃）
+	}
+
+	var receipt EVMReceipt
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		return nil, fmt.Errorf("unmarshal receipt failed: %w", err)
+	}
+	return &receipt, nil
+}
+
 // 1. evm_rpc_client.go 中：统一提供高效的 GetLatestBlockNumber
 func (c *EvmRPCClient) GetLatestBlockNumber(ctx context.Context) (uint64, error) {
 	raw, err := c.doRPC(ctx, rpcRequest{
@@ -90,6 +121,36 @@ func (c *EvmRPCClient) GetLatestBlockNumber(ctx context.Context) (uint64, error)
 		return 0, fmt.Errorf("parse hex (%s) to uint64 failed: %w", hexBlock, err)
 	}
 	return num, nil
+}
+
+// GetBlockTimestamp 根据区块高度获取其链上 Header 中的真实时间戳 (Unix 秒级时间戳)
+func (c *EvmRPCClient) GetBlockTimestamp(ctx context.Context, blockNumber uint64) (int64, error) {
+	raw, err := c.doRPC(ctx, rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_getBlockByNumber",
+		Params:  []interface{}{fmt.Sprintf("0x%x", blockNumber), false},
+		ID:      4,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if string(raw) == "null" || len(raw) == 0 {
+		return 0, fmt.Errorf("block %d not found", blockNumber)
+	}
+
+	var blockInfo struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(raw, &blockInfo); err != nil {
+		return 0, fmt.Errorf("unmarshal block timestamp failed: %w", err)
+	}
+
+	cleanHex := strings.TrimPrefix(strings.ToLower(blockInfo.Timestamp), "0x")
+	ts, err := strconv.ParseInt(cleanHex, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse timestamp hex (%s) failed: %w", blockInfo.Timestamp, err)
+	}
+	return ts, nil
 }
 
 // GetERC20Logs 通用的 ERC20 Transfer 事件拉取

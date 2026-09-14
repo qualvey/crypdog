@@ -20,9 +20,9 @@ import (
 	"gorm.io/gorm"
 )
 
-var knownSolanaTokens = map[string]TokenMeta{
-	"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": {Symbol: model.TokenUSDT, Decimals: 6},
-	"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {Symbol: model.TokenUSDC, Decimals: 6},
+var DefaultSolanaTokens = []model.TokenSpec{
+	{Identifier: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", Symbol: model.TokenUSDT, Decimals: 6},
+	{Identifier: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", Symbol: model.TokenUSDC, Decimals: 6},
 }
 
 type SolanaScanner struct {
@@ -37,19 +37,58 @@ type SolanaScanner struct {
 	// 3. 业务进度位点 (按监控地址维护 Signature 锚点)
 	sigMu          sync.RWMutex      // 保证 Map 并发读写安全
 	lastSignatures map[string]string // targetAddress -> last known tx signature
+	tokensMu       sync.RWMutex
+	tokens         map[string]model.TokenSpec
+	ataMu          sync.RWMutex
+	tokenAccounts  map[string][]string // ownerAddress -> []tokenAccountPubkeys
 }
 
-func NewSolanaScanner(db *gorm.DB, cfg *config.ChainNodeConfig) Scanner {
+func NewSolanaScanner(db *gorm.DB, cfg *config.ChainNodeConfig) (Scanner, error) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
-	return &SolanaScanner{
+	scanner := &SolanaScanner{
 		db:             db,
 		cfg:            cfg,
 		client:         client,
 		rpcURL:         cfg.RPCURL,
 		lastSignatures: make(map[string]string),
+		tokens:         make(map[string]model.TokenSpec),
+		tokenAccounts:  make(map[string][]string),
 	}
+	for _, spec := range DefaultSolanaTokens {
+		scanner.tokens[spec.Identifier] = spec
+	}
+
+	// 3. 外部注入：从 Cfg.Tokens 读取用户在 YAML 中自定义或覆盖的代币
+	for _, t := range cfg.Tokens {
+		trimmedAddr := strings.TrimSpace(t.Identifier)
+		if trimmedAddr == "" {
+			continue
+		}
+		scanner.tokens[trimmedAddr] = model.TokenSpec{
+			Symbol:     t.Symbol,
+			Identifier: trimmedAddr, // Solana Base58 严格区分大小写，严禁 ToLower
+			Decimals:   t.Decimals,
+			IsNative:   false,
+		}
+	}
+	return scanner, nil
+}
+// SupportedTokens implements [Scanner].
+func (s *SolanaScanner) SupportedTokens() []model.TokenSpec {
+	s.tokensMu.RLock()
+	defer s.tokensMu.RUnlock()
+	result := make([]model.TokenSpec, 0, len(s.tokens))
+	for _, spec := range s.tokens {
+		result = append(result, spec)
+	}
+	return result
 }
 
 func (s *SolanaScanner) Chain() model.Chain {
@@ -86,12 +125,13 @@ func (s *SolanaScanner) Start(ctx context.Context, transferChan chan<- model.Cha
 }
 
 func (s *SolanaScanner) scanActiveAddresses(ctx context.Context, transferChan chan<- model.ChainTransfer) {
+	// 无论是否有活跃监听地址，每个扫描周期始终必须刷新链上最新高度，防止无 WATCHING 订单时 CONFIRMING 订单确认数检测卡死
+	s.refreshLatestSlot(ctx)
+
 	addresses := s.getActiveTargetAddresses()
 	if len(addresses) == 0 {
 		return
 	}
-
-	s.refreshLatestSlot(ctx)
 
 	for _, addr := range addresses {
 		select {
@@ -102,6 +142,7 @@ func (s *SolanaScanner) scanActiveAddresses(ctx context.Context, transferChan ch
 		}
 	}
 }
+
 func (s *SolanaScanner) refreshLatestSlot(ctx context.Context) error {
 	res, err := s.callRPC(ctx, "getSlot", []interface{}{})
 	if err != nil {
@@ -113,56 +154,202 @@ func (s *SolanaScanner) refreshLatestSlot(ctx context.Context) error {
 		metrics.RecordScanError("SOLANA", "solana")
 		return err
 	}
-	// 原子存储更新
-	if slot > s.latestBlock.Load() {
-		s.latestBlock.Store(slot)
+	// 原子 CAS 更新最新 Slot
+	for {
+		current := s.latestBlock.Load()
+		if slot <= current {
+			break
+		}
+		if s.latestBlock.CompareAndSwap(current, slot) {
+			break
+		}
 	}
 	metrics.RecordScanBlock("SOLANA", s.latestBlock.Load(), slot)
 	return nil
 }
 
-// 2. 独立提取：只查询并去重目标地址
+// 2. 独立提取：常态化监控平台所有已启用的 SOLANA 收款钱包地址池
 func (s *SolanaScanner) getActiveTargetAddresses() []string {
+	if s.db == nil {
+		return nil
+	}
 	var addrs []string
-	s.db.Model(&model.PaymentIntent{}).
-		Where("status = ? AND UPPER(chain) = ?", model.StatusWatching, "SOLANA").
+	s.db.Model(&model.WalletAddress{}).
+		Where("(chain = ? OR UPPER(chain) = ?) AND enabled = ?", model.ChainSolana, "SOLANA", true).
 		Distinct().
-		Pluck("target_address", &addrs)
+		Pluck("address", &addrs)
 	return addrs
 }
 
-// 3. 独立处理单个地址的扫描与游标更新
+func (s *SolanaScanner) getAddressesToScan(ctx context.Context, owner string) []string {
+	addrs := []string{owner}
+	s.ataMu.RLock()
+	cached, exists := s.tokenAccounts[owner]
+	s.ataMu.RUnlock()
+
+	if exists && len(cached) > 0 {
+		return append(addrs, cached...)
+	}
+
+	tas, err := s.getTokenAccountsByOwner(ctx, owner)
+	if err == nil && len(tas) > 0 {
+		s.ataMu.Lock()
+		s.tokenAccounts[owner] = tas
+		s.ataMu.Unlock()
+		addrs = append(addrs, tas...)
+	}
+	return addrs
+}
+
+func (s *SolanaScanner) getTokenAccountsByOwner(ctx context.Context, owner string) ([]string, error) {
+	params := []interface{}{
+		owner,
+		map[string]interface{}{
+			"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+		},
+		map[string]interface{}{
+			"encoding": "jsonParsed",
+		},
+	}
+	res, err := s.callRPC(ctx, "getTokenAccountsByOwner", params)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Value []struct {
+			Pubkey string `json:"pubkey"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(res, &resp); err != nil {
+		return nil, err
+	}
+	var accounts []string
+	for _, v := range resp.Value {
+		if v.Pubkey != "" {
+			accounts = append(accounts, v.Pubkey)
+		}
+	}
+	return accounts, nil
+}
+
+// 3. 独立处理单个地址及其关联 Token 账户的扫描与游标更新
 func (s *SolanaScanner) scanSingleAddress(ctx context.Context, addr string, ch chan<- model.ChainTransfer) {
+	queryAddrs := s.getAddressesToScan(ctx, addr)
+	for _, qAddr := range queryAddrs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			s.scanAddressStream(ctx, qAddr, addr, ch)
+		}
+	}
+}
+
+func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, targetOwner string, ch chan<- model.ChainTransfer) {
 	// 1. 从内存锁中读取上次记录的游标 (string)
 	s.sigMu.RLock()
-	lastSig := s.lastSignatures[addr]
+	lastSig := s.lastSignatures[queryAddr]
 	s.sigMu.RUnlock()
 
-	// 2. 传入 string 类型的游标，只增量拉取新签名
-	sigs, err := s.getSignaturesForAddress(ctx, addr, lastSig)
-	if err != nil || len(sigs) == 0 {
+	// 2. 若内存游标为空且存在 DB，尝试从历史入库流水恢复游标
+	if lastSig == "" && s.db != nil {
+		var lastTransfer model.ChainTransfer
+		if err := s.db.WithContext(ctx).
+			Where("chain = ? AND (target_address = ? OR target_address = ?)", model.ChainSolana, targetOwner, queryAddr).
+			Order("id DESC").First(&lastTransfer).Error; err == nil && lastTransfer.TxHash != "" {
+			lastSig = lastTransfer.TxHash
+			s.sigMu.Lock()
+			s.lastSignatures[queryAddr] = lastSig
+			s.sigMu.Unlock()
+		}
+	}
+
+	// 3. 传入 string 类型的游标，增量拉取新签名（支持分页，避免突发 > 50 笔漏单）
+	var allSigs []solSig
+	before := ""
+	for {
+		batch, err := s.getSignaturesForAddress(ctx, queryAddr, lastSig, before)
+		if err != nil {
+			metrics.RecordScanError("SOLANA", "solana")
+			log.Printf("[SolanaScanner] 获取地址 %s 签名失败: %v", queryAddr, err)
+			return
+		}
+		if len(batch) == 0 {
+			break
+		}
+		allSigs = append(allSigs, batch...)
+		// 若 lastSig 为空（冷启动）或本批未满 50 条，或单次已拉取 200 条，停止防过载
+		if lastSig == "" || len(batch) < 50 || len(allSigs) >= 200 {
+			break
+		}
+		before = batch[len(batch)-1].Signature
+	}
+
+	if len(allSigs) == 0 {
 		return
 	}
 
-	// 3. 更新最新水位线（sigs[0] 是最新的一笔交易）
-	s.sigMu.Lock()
-	s.lastSignatures[addr] = sigs[0].Signature
-	s.sigMu.Unlock()
+	// 4. 冷启动保护：若此前没有任何游标（全新地址首次监听）
+	var cutoff int64
+	if lastSig == "" {
+		// 先将最新签名置为游标水位线，确保后续周期只拉增量
+		s.sigMu.Lock()
+		s.lastSignatures[queryAddr] = allSigs[0].Signature
+		s.sigMu.Unlock()
 
-	// 4. 处理交易
-	for _, sigInfo := range sigs {
+		// 检查该地址是否有活跃订单创建时间限制
+		if s.db != nil {
+			var intent model.PaymentIntent
+			if err := s.db.WithContext(ctx).
+				Where("status = ? AND UPPER(chain) = ? AND (target_address = ? OR target_address = ?)", model.StatusWatching, "SOLANA", targetOwner, queryAddr).
+				Order("created_at ASC").First(&intent).Error; err == nil && !intent.CreatedAt.IsZero() {
+				cutoff = intent.CreatedAt.Add(-60 * time.Second).Unix()
+			}
+		}
+	}
+
+	// 5. 按时间升序（从旧到新，即反向遍历）处理交易，并逐笔安全推进游标
+	for i := len(allSigs) - 1; i >= 0; i-- {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		sigInfo := allSigs[i]
 		if sigInfo.Err != nil {
+			// 失败链上交易，跳过并记录游标
+			s.sigMu.Lock()
+			s.lastSignatures[queryAddr] = sigInfo.Signature
+			s.sigMu.Unlock()
 			continue
 		}
-		s.processTransaction(ctx, sigInfo.Signature, addr, ch)
+
+		if err := s.processTransaction(ctx, sigInfo.Signature, targetOwner, cutoff, ch); err != nil {
+			log.Printf("[SolanaScanner] 解析处理交易 %s 失败: %v", sigInfo.Signature, err)
+			return // 发生错误停止继续推进，保留未处理签名以便下一周期重试
+		}
+
+		s.sigMu.Lock()
+		s.lastSignatures[queryAddr] = sigInfo.Signature
+		s.sigMu.Unlock()
 	}
 }
 
 // 4. 独立提取：纯交易解析逻辑，方便编写单元测试
-func (s *SolanaScanner) processTransaction(ctx context.Context, sig, targetAddr string, ch chan<- model.ChainTransfer) {
+func (s *SolanaScanner) processTransaction(ctx context.Context, sig, targetAddr string, cutoff int64, ch chan<- model.ChainTransfer) error {
 	tx, err := s.getTransaction(ctx, sig)
-	if err != nil || tx == nil {
-		return
+	if err != nil {
+		metrics.RecordScanError("SOLANA", "solana")
+		return err
+	}
+	if tx == nil {
+		return nil
+	}
+
+	if cutoff > 0 && tx.BlockTime > 0 && tx.BlockTime < cutoff {
+		// 属于订单创建前的历史陈旧交易，跳过不推入队列
+		return nil
 	}
 
 	// 解析出所有的入账事件
@@ -171,10 +358,12 @@ func (s *SolanaScanner) processTransaction(ctx context.Context, sig, targetAddr 
 	for _, tr := range transfers {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case ch <- tr:
+			metrics.RecordTransferCaptured(string(model.ChainSolana), string(tr.Token))
 		}
 	}
+	return nil
 }
 
 func (s *SolanaScanner) extractIncomingTransfers(tx *solTx, targetAddr string) []model.ChainTransfer {
@@ -195,16 +384,39 @@ func (s *SolanaScanner) extractIncomingTransfers(tx *solTx, targetAddr string) [
 
 	var transfers []model.ChainTransfer
 
-	// 获取交易哈希
+	// 获取交易哈希与发起方
 	txHash := ""
 	if len(tx.Transaction.Signatures) > 0 {
 		txHash = tx.Transaction.Signatures[0]
 	}
 
+	fromAddress := "Unknown"
+	if tx.Transaction.Message != nil {
+		for _, ak := range tx.Transaction.Message.AccountKeys {
+			if keyMap, ok := ak.(map[string]interface{}); ok {
+				if isSigner, _ := keyMap["signer"].(bool); isSigner {
+					if pubkey, _ := keyMap["pubkey"].(string); pubkey != "" {
+						fromAddress = pubkey
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 统一采用秒级时间戳，若 Solana 节点出块时间未就绪，兜底当前本地时间
+	blockTs := tx.BlockTime
+	if blockTs <= 0 {
+		blockTs = time.Now().Unix()
+	}
+
+	s.tokensMu.RLock()
+	defer s.tokensMu.RUnlock()
+
 	// 2. 遍历 PostTokenBalances，只关注属于目标地址 targetAddr 的账户
 	for _, post := range tx.Meta.PostTokenBalances {
-		// 校验当前 Token 账户的所有者是否是目标地址
-		if !strings.EqualFold(strings.TrimSpace(post.Owner), targetAddr) {
+		// 校验当前 Token 账户的所有者是否是目标地址 (Solana Base58 严格区分大小写)
+		if strings.TrimSpace(post.Owner) != targetAddr {
 			continue
 		}
 
@@ -223,9 +435,13 @@ func (s *SolanaScanner) extractIncomingTransfers(tx *solTx, targetAddr string) [
 		if diff.GreaterThan(decimal.Zero) {
 			// 映射代币 Symbol（如根据 Mint 合约映射为 USDT / USDC）
 			tokenSymbol := model.Token(post.Mint)
-			if meta, ok := knownSolanaTokens[post.Mint]; ok {
+			if meta, ok := s.tokens[post.Mint]; ok {
 				tokenSymbol = meta.Symbol
 			}
+
+			// 计算本次转账的无损原始链上最小单位数值 (例如 15 USDT, 精度 6 -> 15000000)
+			decimals := post.UiTokenAmount.Decimals
+			rawVal := diff.Mul(decimal.New(1, int32(decimals))).Floor().String()
 
 			// 直接构造完整的 ChainTransfer
 			transfer := model.ChainTransfer{
@@ -233,13 +449,14 @@ func (s *SolanaScanner) extractIncomingTransfers(tx *solTx, targetAddr string) [
 				Chain:          model.ChainSolana,
 				LogIndex:       int64(post.AccountIndex), // 以 accountIndex 作为 tx 内唯一索引
 				Contract:       post.Mint,
-				FromAddress:    "Unknown",
+				FromAddress:    fromAddress,
 				TargetAddress:  targetAddr,
 				Amount:         diff,
-				RawValue:       post.UiTokenAmount.Amount, // 原始大整数
+				RawValue:       rawVal,
 				Token:          tokenSymbol,
 				BlockNumber:    tx.Slot,
-				BlockTimestamp: tx.BlockTime * 1000,
+				BlockTimestamp: blockTs,
+				Decimals:       uint8(decimals),
 			}
 			transfers = append(transfers, transfer)
 		}
@@ -274,7 +491,10 @@ func (s *SolanaScanner) callRPC(ctx context.Context, method string, params inter
 		Method:  method,
 		Params:  params,
 	}
-	b, _ := json.Marshal(reqBody)
+	b, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", s.rpcURL, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
@@ -285,6 +505,13 @@ func (s *SolanaScanner) callRPC(ctx context.Context, method string, params inter
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		buf := make([]byte, 256)
+		n, _ := resp.Body.Read(buf)
+		return nil, fmt.Errorf("RPC HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(buf[:n])))
+	}
+
 	var res rpcRes
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
@@ -313,11 +540,14 @@ type solSig struct {
 	Err       interface{} `json:"err"` // null if successful
 }
 
-func (s *SolanaScanner) getSignaturesForAddress(ctx context.Context, address, until string) ([]solSig, error) {
+func (s *SolanaScanner) getSignaturesForAddress(ctx context.Context, address, until string, before ...string) ([]solSig, error) {
 	params := []interface{}{address}
 	opts := map[string]interface{}{"limit": 50}
 	if until != "" {
 		opts["until"] = until
+	}
+	if len(before) > 0 && before[0] != "" {
+		opts["before"] = before[0]
 	}
 	params = append(params, opts)
 	res, err := s.callRPC(ctx, "getSignaturesForAddress", params)
@@ -334,6 +564,9 @@ func (s *SolanaScanner) getSignaturesForAddress(ctx context.Context, address, un
 type solTx struct {
 	Transaction struct {
 		Signatures []string `json:"signatures"`
+		Message    *struct {
+			AccountKeys []interface{} `json:"accountKeys"`
+		} `json:"message,omitempty"`
 	} `json:"transaction"`
 	Slot      uint64 `json:"slot"`
 	BlockTime int64  `json:"blockTime"`

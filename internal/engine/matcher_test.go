@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -209,7 +211,7 @@ func TestMatcherEngine_ProcessTransfer_AmountMismatch_Ignored(t *testing.T) {
 	assert.Empty(t, unchangedIntent.TxHash)
 }
 
-func TestMatcherEngine_ProcessTransfer_UsdtUsdcCrossMatch(t *testing.T) {
+func TestMatcherEngine_ProcessTransfer_NoCrossTokenMatch(t *testing.T) {
 	db := setupEngineTestDB(t)
 	cfg := setupMockConfig()
 	dispatcher := queue.NewWebhookDispatcher(db, cfg)
@@ -244,7 +246,240 @@ func TestMatcherEngine_ProcessTransfer_UsdtUsdcCrossMatch(t *testing.T) {
 
 	var updatedIntent model.PaymentIntent
 	require.NoError(t, db.Where("order_id = ?", "ord_cross_001").First(&updatedIntent).Error)
-	assert.Equal(t, model.StatusPaid, updatedIntent.Status, "USDC 充值应能成功撮合 USDT 等价订单")
-	assert.Equal(t, "0xhash_cross_usdc_payment", updatedIntent.TxHash)
+	assert.Equal(t, model.StatusWatching, updatedIntent.Status, "USDT 意向不能被 USDC 充值跨币种撮合，应保持 WATCHING 状态")
+	assert.Empty(t, updatedIntent.TxHash)
 }
+
+func TestMatcherEngine_LatePaymentRecovery(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+	engine := NewMatcherEngine(db, cfg, dispatcher)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+	// 准备一条已经超时的 EXPIRED 订单（超时时间设为 10 分钟前）
+	intent := model.PaymentIntent{
+		ID:             "intent_expired_001",
+		OrderID:        "ord_expired_001",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("50.0001"),
+		Status:         model.StatusExpired,
+		ExpiresAt:      time.Now().Add(-10 * time.Minute),
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	// 用户迟到了，转账金额吻合
+	transfer := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_late_payment",
+		0,
+		"Unknown",
+		targetAddr,
+		"50000100",
+		100,
+	)
+	transfer.Token = model.TokenUSDT
+	transfer.Amount = decimal.RequireFromString("50.0001")
+	transfer.BlockTimestamp = time.Now().Unix()
+
+	err := engine.ProcessTransfer(transfer, 115)
+	require.NoError(t, err)
+
+	// 验证订单成功挽回并推进为 PAID
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_expired_001").First(&updatedIntent).Error)
+	assert.Equal(t, model.StatusPaid, updatedIntent.Status, "迟到充值应成功挽回并将订单流转为 PAID")
+	assert.Equal(t, "0xhash_late_payment", updatedIntent.TxHash)
+}
+
+func TestMatcherEngine_ReprocessUnmatchedTransfer(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+	engine := NewMatcherEngine(db, cfg, dispatcher)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+
+	// 1. 预先落库一笔未撮合的流水 (matched_order_id 为空)
+	transfer := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_historical_unmatched",
+		0,
+		"0xfromUser",
+		targetAddr,
+		"100000100",
+		100,
+	)
+	transfer.Token = model.TokenUSDT
+	transfer.Amount = decimal.RequireFromString("100.0001")
+	transfer.BlockTimestamp = time.Now().Unix()
+	require.NoError(t, db.Create(&transfer).Error)
+
+	// 2. 此时创建订单 (例如用户在转账之后才创建订单，或服务重启恢复未匹配流水)
+	intent := model.PaymentIntent{
+		ID:             "intent_recovery_001",
+		OrderID:        "ord_recovery_001",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("100.0001"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	// 3. 执行补偿重试撮合 ReprocessUnmatchedTransfer
+	err := engine.ReprocessUnmatchedTransfer(transfer, 115)
+	require.NoError(t, err)
+
+	// 4. 验证订单成功被撮合并标记为 PAID
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_recovery_001").First(&updatedIntent).Error)
+	assert.Equal(t, model.StatusPaid, updatedIntent.Status)
+	assert.Equal(t, "0xhash_historical_unmatched", updatedIntent.TxHash)
+
+	// 验证流水更新了 matched_order_id
+	var updatedTransfer model.ChainTransfer
+	require.NoError(t, db.Where("tx_hash = ?", transfer.TxHash).First(&updatedTransfer).Error)
+	assert.Equal(t, "ord_recovery_001", updatedTransfer.MatchedOrderID)
+}
+
+func TestMatcherEngine_HistoricalTheftPrevented(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+	engine := NewMatcherEngine(db, cfg, dispatcher)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+
+	// 1. 模拟 1 小时前发生的历史未认领流水 (如他人打错款)
+	historicalTransfer := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_ancient_theft_attempt",
+		0,
+		"0xfromAttacker",
+		targetAddr,
+		"100000100",
+		100,
+	)
+	historicalTransfer.Token = model.TokenUSDT
+	historicalTransfer.Amount = decimal.RequireFromString("100.0001")
+	historicalTransfer.BlockTimestamp = time.Now().Add(-1 * time.Hour).Unix()
+	require.NoError(t, db.Create(&historicalTransfer).Error)
+
+	// 2. 攻击者现在创建新订单，故意使用相同的金额 100.0001 试图白嫖盗刷
+	intent := model.PaymentIntent{
+		ID:             "intent_theft_target",
+		OrderID:        "ord_theft_target",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("100.0001"),
+		Status:         model.StatusWatching,
+		CreatedAt:      time.Now(),
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	// 3. 触发撮合 (模拟流水补偿重放)
+	err := engine.ReprocessUnmatchedTransfer(historicalTransfer, 120)
+	require.NoError(t, err)
+
+	// 4. 验证：由于历史流水发生时间早于订单创建时间，绝对禁止撮合，订单必须保持 WATCHING，防盗刷成功！
+	var checkedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_theft_target").First(&checkedIntent).Error)
+	assert.Equal(t, model.StatusWatching, checkedIntent.Status, "历史早于订单创建的流水绝不可匹配新订单")
+	assert.Empty(t, checkedIntent.TxHash)
+}
+
+func TestMatcherEngine_TxVerifier_RevertBlocked(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+
+	// 注入自定义 txVerifier：模拟链上查询到该交易其实执行失败 (Revert / status == 0x0)
+	fakeVerifier := func(ctx context.Context, chain model.Chain, txHash string, blockNumber uint64) (bool, error) {
+		return false, nil // 交易无效
+	}
+	engine := NewMatcherEngine(db, cfg, dispatcher, fakeVerifier)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+	intent := model.PaymentIntent{
+		ID:             "intent_revert_test",
+		OrderID:        "ord_revert_test",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("100.000100"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	transfer := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_reverted_tx",
+		0,
+		"0xfrom",
+		targetAddr,
+		"100000000",
+		100,
+	)
+	transfer.Token = model.TokenUSDT
+	transfer.Amount = decimal.RequireFromString("100.000100")
+	transfer.BlockTimestamp = time.Now().Unix()
+
+	// 当前高度 120 (满足确认数)，但由于 txVerifier 报告交易失败，必须阻断
+	err := engine.ProcessTransfer(transfer, 120)
+	assert.Error(t, err, "假充值/已Revert交易必须报错阻断")
+
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_revert_test").First(&updatedIntent).Error)
+	assert.NotEqual(t, model.StatusPaid, updatedIntent.Status, "失败交易绝不能标记为 PAID")
+}
+
+func TestMatcherEngine_TxVerifier_RPCDowngradeToConfirming(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig()
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+
+	// 注入自定义 txVerifier：模拟 RPC 节点网络抖动或超时
+	jitterVerifier := func(ctx context.Context, chain model.Chain, txHash string, blockNumber uint64) (bool, error) {
+		return false, errors.New("rpc timeout or rate limited")
+	}
+	engine := NewMatcherEngine(db, cfg, dispatcher, jitterVerifier)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+	intent := model.PaymentIntent{
+		ID:             "intent_rpc_error_test",
+		OrderID:        "ord_rpc_error_test",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("100.000100"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	transfer := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_rpc_error_tx",
+		0,
+		"0xfrom",
+		targetAddr,
+		"100000000",
+		100,
+	)
+	transfer.Token = model.TokenUSDT
+	transfer.Amount = decimal.RequireFromString("100.000100")
+	transfer.BlockTimestamp = time.Now().Unix()
+
+	// 当前高度 120 (满足确认数)，但由于 RPC 抖动，安全降级为 CONFIRMING
+	err := engine.ProcessTransfer(transfer, 120)
+	require.NoError(t, err)
+
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_rpc_error_test").First(&updatedIntent).Error)
+	assert.Equal(t, model.StatusConfirming, updatedIntent.Status, "RPC 抖动时应安全降级为 CONFIRMING，待 Worker 重试")
+}
+
 
