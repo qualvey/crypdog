@@ -121,3 +121,39 @@ func TestEvmScanner_BlockTimestampCaching(t *testing.T) {
 	assert.Equal(t, int64(1700000000), ts2)
 	assert.Equal(t, 1, callCount, "同一个区块时间戳应走缓存，不应重复请求 RPC")
 }
+
+func TestEvmRPCClient_Failover(t *testing.T) {
+	// 模拟挂掉的主节点
+	failedPrimary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer failedPrimary.Close()
+
+	// 模拟正常的备用节点
+	backupCalled := false
+	healthyBackup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalled = true
+		resp := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x10", // 16
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer healthyBackup.Close()
+
+	client := NewEvmRPCClient(failedPrimary.URL, healthyBackup.URL)
+	assert.Equal(t, failedPrimary.URL, client.GetActiveRPCURL())
+
+	blockNum, err := client.GetLatestBlockNumber(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(16), blockNum)
+	assert.True(t, backupCalled, "备用节点应当被调用")
+	assert.Equal(t, healthyBackup.URL, client.GetActiveRPCURL(), "主选节点应自动切换为可用的备用节点")
+
+	// 测试所有节点都挂掉的情况
+	allFailedClient := NewEvmRPCClient(failedPrimary.URL)
+	_, errAllFailed := allFailedClient.GetLatestBlockNumber(context.Background())
+	assert.Error(t, errAllFailed)
+	assert.Contains(t, errAllFailed.Error(), "all 1 rpc nodes failed")
+}

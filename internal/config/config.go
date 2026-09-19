@@ -11,6 +11,7 @@ import (
 
 // Config 根配置结构体
 type Config struct {
+	Env               string         `yaml:"env" env:"APP_ENV" env-default:"development"`
 	ServerPort        string         `yaml:"server_port"`
 	ServiceSecret     string         `yaml:"service_secret"`
 	WebhookSecret     string         `yaml:"webhook_secret"`
@@ -19,10 +20,10 @@ type Config struct {
 	ScanIntervalSec   int            `yaml:"scan_interval_sec" env:"SCAN_INTERVAL_SEC" env-default:"5"`
 	Webhook           WebhookConfig  `yaml:"webhook"`
 	Database          DatabaseConfig `yaml:"database"`
-	Monitor         MonitorConfig  `yaml:"monitor"`
-	Log             LogConfig      `yaml:"log"`
-	Metrics         MetricsConfig  `yaml:"metrics"`
-	Pprof           PprofConfig    `yaml:"pprof"`
+	Monitor           MonitorConfig  `yaml:"monitor"`
+	Log               LogConfig      `yaml:"log"`
+	Metrics           MetricsConfig  `yaml:"metrics"`
+	Pprof             PprofConfig    `yaml:"pprof"`
 	//全大写
 	Chains         map[model.Chain]ChainNodeConfig `yaml:"chains"`
 	InitialWallets []InitialWallet                 `yaml:"initial_wallets"`
@@ -62,8 +63,9 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Port   string `yaml:"server_port" env:"SERVER_PORT" env-default:"8080"`
-	Secret string `yaml:"service_secret" env:"SERVICE_SECRET_KEY" env-default:"crypdog-secret-key-123456"`
+	Port             string `yaml:"server_port" env:"SERVER_PORT" env-default:"8080"`
+	Secret           string `yaml:"service_secret" env:"SERVICE_SECRET_KEY" env-default:"crypdog-secret-key-123456"`
+	EnableSimulation bool   `yaml:"enable_simulation" env:"ENABLE_SIMULATION" env-default:"false"`
 }
 type WebhookConfig struct {
 	Secret     string `yaml:"webhook_secret" env:"SHARED_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
@@ -92,6 +94,25 @@ type MetricsConfig struct {
 // PprofConfig 性能探针配置
 type PprofConfig struct {
 	Enabled bool `yaml:"enabled" env:"PPROF_ENABLED" env-default:"false"`
+}
+
+// ValidateProduction 校验生产环境配置，防御弱口令与不安全配置
+func (c *Config) ValidateProduction() error {
+	if c.Env == "production" || c.Env == "prod" {
+		if c.Server.Secret == "crypdog-secret-key-123456" || len(c.Server.Secret) < 16 {
+			return fmt.Errorf("生产环境安全阻断: service_secret 不能使用默认弱口令，且长度须 >= 16 字符")
+		}
+		if c.Webhook.Secret == "crypdog-webhook-secret-987654" || len(c.Webhook.Secret) < 16 {
+			return fmt.Errorf("生产环境安全阻断: webhook_secret 不能使用默认弱口令，且长度须 >= 16 字符")
+		}
+		if c.Webhook.AllowLocal {
+			return fmt.Errorf("生产环境安全阻断: webhook.allow_local 必须为 false 以严格防御 SSRF 攻击")
+		}
+		if c.Server.EnableSimulation {
+			return fmt.Errorf("生产环境安全阻断: server.enable_simulation 必须为 false，严禁生产环境开启模拟入账接口")
+		}
+	}
+	return nil
 }
 
 // LoadConfig 最佳实践加载流程：优先读 YAML 文件，随后读取环境变量覆盖
@@ -126,6 +147,11 @@ func LoadConfig(configPath ...string) (*Config, error) {
 	}
 	if cfg.WebhookAllowLocal != nil {
 		cfg.Webhook.AllowLocal = *cfg.WebhookAllowLocal
+	}
+
+	// 3. 生产就绪校验
+	if err := cfg.ValidateProduction(); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

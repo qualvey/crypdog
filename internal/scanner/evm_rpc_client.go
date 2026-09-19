@@ -6,25 +6,52 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type EvmRPCClient struct {
-	rpcURL string
-	client *http.Client
+	rpcURLs      []string
+	currentIndex atomic.Uint32
+	client       *http.Client
 }
 
-func NewEvmRPCClient(rpcURL string) *EvmRPCClient {
+func NewEvmRPCClient(primaryURL string, backupURLs ...string) *EvmRPCClient {
+	urls := make([]string, 0, 1+len(backupURLs))
+	if u := strings.TrimSpace(primaryURL); u != "" {
+		urls = append(urls, u)
+	}
+	seen := map[string]bool{primaryURL: true}
+	for _, b := range backupURLs {
+		b = strings.TrimSpace(b)
+		if b != "" && !seen[b] {
+			seen[b] = true
+			urls = append(urls, b)
+		}
+	}
+	if len(urls) == 0 {
+		urls = []string{""}
+	}
 	return &EvmRPCClient{
-		rpcURL: rpcURL,
+		rpcURLs: urls,
 		client: &http.Client{
 			Timeout: 12 * time.Second,
 		},
 	}
+}
+
+// GetActiveRPCURL 获取当前正在使用的主选 RPC 节点地址
+func (c *EvmRPCClient) GetActiveRPCURL() string {
+	if len(c.rpcURLs) == 0 {
+		return ""
+	}
+	idx := c.currentIndex.Load() % uint32(len(c.rpcURLs))
+	return c.rpcURLs[idx]
 }
 
 type rpcRequest struct {
@@ -206,13 +233,48 @@ func (c *EvmRPCClient) GetERC20Logs(ctx context.Context, fromBlock, toBlock uint
 }
 
 func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMessage, error) {
+	if len(c.rpcURLs) == 0 {
+		return nil, fmt.Errorf("no rpc url configured")
+	}
+
 	jsonBytes, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal rpc request failed: %w", err)
 	}
 
+	startIdx := int(c.currentIndex.Load() % uint32(len(c.rpcURLs)))
+	numNodes := len(c.rpcURLs)
+	var lastErr error
+
+	for i := 0; i < numNodes; i++ {
+		currIdx := (startIdx + i) % numNodes
+		nodeURL := c.rpcURLs[currIdx]
+		if nodeURL == "" {
+			continue
+		}
+
+		result, err := c.doSingleRPC(ctx, nodeURL, jsonBytes)
+		if err == nil {
+			if i > 0 {
+				c.currentIndex.Store(uint32(currIdx))
+				log.Printf("[EvmRPCClient Failover] ✅ 成功切换并恢复至备用节点 [%s]", nodeURL)
+			}
+			return result, nil
+		}
+
+		lastErr = err
+		if numNodes > 1 {
+			nextIdx := (currIdx + 1) % numNodes
+			log.Printf("[EvmRPCClient Failover] ⚠️ 节点 [%s] 调用失败 (%v)，正在切换尝试备用节点 [%s]...", nodeURL, err, c.rpcURLs[nextIdx])
+		}
+	}
+
+	return nil, fmt.Errorf("all %d rpc nodes failed, last error: %w", numNodes, lastErr)
+}
+
+func (c *EvmRPCClient) doSingleRPC(ctx context.Context, nodeURL string, jsonBytes []byte) (json.RawMessage, error) {
 	// 1. 使用 bytes.NewReader，避免内存额外拷贝
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.rpcURL, bytes.NewReader(jsonBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nodeURL, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create http request failed: %w", err)
 	}

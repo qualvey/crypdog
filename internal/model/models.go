@@ -36,6 +36,7 @@ type PaymentIntent struct {
 	BlockNumber    uint64          `gorm:"default:0" json:"blockNumber,omitempty"`
 	Confirmations  uint64          `gorm:"default:0" json:"confirmations,omitempty"`
 	ExpiresAt      time.Time       `gorm:"not null;index" json:"expiresAt"`
+	DetectedAt     *time.Time      `gorm:"index" json:"detectedAt,omitempty"`
 	PaidAt         *time.Time      `gorm:"index" json:"paidAt,omitempty"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
@@ -67,6 +68,7 @@ type ChainTransfer struct {
 type WebhookLog struct {
 	ID           uint       `gorm:"primaryKey;autoIncrement" json:"id"`
 	OrderID      string     `gorm:"size:128;not null;index" json:"orderId"`
+	Event        string     `gorm:"size:32;not null;default:'confirm';index" json:"event"`
 	WebhookURL   string     `gorm:"size:512;not null" json:"webhookUrl"`
 	Payload      string     `gorm:"type:text;not null" json:"payload"`
 	Signature    string     `gorm:"size:128;not null" json:"signature"`
@@ -101,122 +103,6 @@ const (
 	ChainPolygon  Chain = "POLYGON"
 	ChainArbitrum Chain = "ARBITRUM"
 )
-
-const (
-	CNY Currency = "CNY"
-	USD Currency = "USD"
-)
-
-type AlipayConfig struct {
-	Enabled            bool   `json:"enabled"`
-	AppID              string `json:"appId"`
-	MerchantPrivateKey string `json:"merchantPrivateKey,omitempty"`
-	AlipayPublicKey    string `json:"alipayPublicKey,omitempty"`
-	Sandbox            bool   `json:"sandbox"`
-}
-
-type AggregateConfig struct {
-	Enabled    bool   `json:"enabled"`
-	MerchantID string `json:"merchantId"`
-	APIKey     string `json:"apiKey,omitempty"`
-	GatewayURL string `json:"gatewayUrl"`
-}
-
-type CrypCoin struct {
-	Chain            Chain
-	Token            Token
-	ExchangeRate     decimal.Decimal `json:"exchangeRate"`
-	AutoExchangeRate bool            `json:"autoExchangeRate"`
-	Provider         string          `json:"provider"`
-	Decimals         int             `json:"decimals"`
-	Enabled          bool            `json:"enabled"`
-}
-
-type Crypto struct {
-	Enabled bool       `json:"enabled"`
-	Coins   []CrypCoin `json:"coins"`
-}
-
-// 提供一个查找方法
-func (c *Crypto) GetCoin(chain Chain, token Token) (*CrypCoin, bool) {
-	for i := range c.Coins {
-		if c.Coins[i].Chain == chain && c.Coins[i].Token == token {
-			return &c.Coins[i], true
-		}
-	}
-	return nil, false
-}
-
-type PaymentConfig struct {
-	ID        uint            `gorm:"primaryKey" json:"-"`
-	Alipay    AlipayConfig    `gorm:"serializer:json" json:"alipay"`
-	Aggregate AggregateConfig `gorm:"serializer:json" json:"aggregate"`
-	Crypto    Crypto          `gorm:"serializer:json" json:"crypto"`
-}
-
-// PublicPaymentConfig is the safe, sanitized view returned to anonymous clients (C-end)
-type PublicPaymentConfig struct {
-	Alipay struct {
-		Enabled bool   `json:"enabled"`
-		AppID   string `json:"appId"`
-		Sandbox bool   `json:"sandbox"`
-	} `json:"alipay"`
-	Aggregate struct {
-		Enabled    bool   `json:"enabled"`
-		MerchantID string `json:"merchantId"`
-		GatewayURL string `json:"gatewayUrl"`
-	} `json:"aggregate"`
-
-	Crypto struct {
-		Coins    []CrypCoin
-		Provider string `json:"provider"`
-	} `json:"crypto_usdt"`
-}
-
-func (p *PaymentConfig) ToPublic() PublicPaymentConfig {
-	var pub PublicPaymentConfig
-	pub.Alipay.Enabled = p.Alipay.Enabled
-	pub.Alipay.AppID = p.Alipay.AppID
-	pub.Alipay.Sandbox = p.Alipay.Sandbox
-
-	pub.Aggregate.Enabled = p.Aggregate.Enabled
-	pub.Aggregate.MerchantID = p.Aggregate.MerchantID
-	pub.Aggregate.GatewayURL = p.Aggregate.GatewayURL
-
-	pub.Crypto.Coins = p.Crypto.Coins
-
-	return pub
-}
-
-type ChannelType string
-
-const (
-	ChannelTypeAlipay    ChannelType = "alipay"
-	ChannelTypeAggregate ChannelType = "aggregate"
-	ChannelTypeCrypto    ChannelType = "crypto"
-)
-
-type CheckoutRequest struct {
-	Channel   ChannelType `json:"channel" binding:"required"`
-	ChainType string      `json:"chainType"`
-	OrderNo   string      `json:"orderNo"`
-	Amount    float64     `json:"amount"`
-	Currency  Currency    `json:"currency"`
-	Chain     Chain       `json:"chain"`
-	Token     Token       `json:"token"`
-}
-
-type PaymentCreateResult struct {
-	Channel       string    `json:"channel"`
-	OrderNo       string    `json:"orderNo"`
-	PayURL        string    `json:"payUrl,omitempty"`
-	QRCode        string    `json:"qrCode,omitempty"`
-	CryptoAddress string    `json:"cryptoAddress,omitempty"`
-	CryptoAmount  float64   `json:"cryptoAmount,omitempty"`
-	ChainType     Chain     `json:"chainType,omitempty"`
-	TokenType     Token     `json:"tokenType,omitempty"`
-	ExpiresAt     time.Time `json:"expiresAt"`
-}
 
 type WalletAddress struct {
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`

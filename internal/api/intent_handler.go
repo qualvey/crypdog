@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypdog/internal/logger"
 	"crypdog/internal/model"
 	"crypdog/internal/service"
 	"crypdog/internal/signature"
@@ -164,6 +165,7 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 	// 校验 Webhook URL 防御 SSRF（生产环境默认严禁私网/回环地址）
 	allowLocal := h.cfg != nil && h.cfg.Webhook.AllowLocal
 	if err := signature.ValidateWebhookURL(req.WebhookURL, allowLocal); err != nil {
+		logger.Info("Webhook validate failed %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": fmt.Sprintf("Invalid webhookUrl: %v", err),
@@ -202,19 +204,28 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 		msg = "Payment intent already active (Idempotent response)"
 	}
 
+	responseData := gin.H{
+		"intentId":       intent.ID,
+		"orderId":        intent.OrderID,
+		"baseAmount":     req.BaseAmount,
+		"tailOffset":     tailOffset,
+		"expectedAmount": intent.ExpectedAmount,
+		"targetAddress":  intent.TargetAddress,
+		"status":         intent.Status,
+		"expiresAt":      intent.ExpiresAt,
+	}
+
+	logger.InfoContext(c.Request.Context(), "接受到订单意向",
+		"data", responseData,
+		"Chain", req.Chain,
+		"Token", req.Token,
+		"is_idempotent", isIdempotent,
+	)
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": msg,
-		"data": gin.H{
-			"intentId":       intent.ID,
-			"orderId":        intent.OrderID,
-			"baseAmount":     req.BaseAmount,
-			"tailOffset":     tailOffset,
-			"expectedAmount": intent.ExpectedAmount,
-			"targetAddress":  intent.TargetAddress,
-			"status":         intent.Status,
-			"expiresAt":      intent.ExpiresAt,
-		},
+		"data":    responseData,
 	})
 }
 
@@ -271,6 +282,14 @@ type SimulateReq struct {
 
 // SimulateOnChainTransfer handles POST /api/v1/watcher/intents/simulate
 func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
+	if h.cfg == nil || !h.cfg.Server.EnableSimulation {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Simulation endpoint is disabled in this environment (set server.enable_simulation: true to enable)",
+		})
+		return
+	}
+
 	var req SimulateReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})

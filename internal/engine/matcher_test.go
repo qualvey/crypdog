@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func setupEngineTestDB(t *testing.T) *gorm.DB {
 	sqlDB.SetMaxOpenConns(1)
 
 	// 自动迁移
-	err = db.AutoMigrate(&model.PaymentIntent{}, &model.ChainTransfer{})
+	err = db.AutoMigrate(&model.PaymentIntent{}, &model.ChainTransfer{}, &model.WebhookLog{})
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -480,6 +481,146 @@ func TestMatcherEngine_TxVerifier_RPCDowngradeToConfirming(t *testing.T) {
 	var updatedIntent model.PaymentIntent
 	require.NoError(t, db.Where("order_id = ?", "ord_rpc_error_test").First(&updatedIntent).Error)
 	assert.Equal(t, model.StatusConfirming, updatedIntent.Status, "RPC 抖动时应安全降级为 CONFIRMING，待 Worker 重试")
+}
+
+type mockDualPhaseDispatcher struct {
+	mu     sync.Mutex
+	events []struct {
+		Event                 string
+		OrderID               string
+		Confirmations         uint64
+		RequiredConfirmations uint64
+	}
+}
+
+func (m *mockDualPhaseDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash string, timestamp int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, struct {
+		Event                 string
+		OrderID               string
+		Confirmations         uint64
+		RequiredConfirmations uint64
+	}{Event: queue.WebhookEventConfirm, OrderID: intent.OrderID, Confirmations: intent.Confirmations})
+}
+
+func (m *mockDualPhaseDispatcher) DispatchEventAsync(event string, intent *model.PaymentIntent, txHash string, timestamp int64, confirmations, requiredConfirmations uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, struct {
+		Event                 string
+		OrderID               string
+		Confirmations         uint64
+		RequiredConfirmations uint64
+	}{Event: event, OrderID: intent.OrderID, Confirmations: confirmations, RequiredConfirmations: requiredConfirmations})
+}
+
+func (m *mockDualPhaseDispatcher) GetEvents() []struct {
+	Event                 string
+	OrderID               string
+	Confirmations         uint64
+	RequiredConfirmations uint64
+} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]struct {
+		Event                 string
+		OrderID               string
+		Confirmations         uint64
+		RequiredConfirmations uint64
+	}, len(m.events))
+	copy(copied, m.events)
+	return copied
+}
+
+func TestMatcherEngine_DualPhaseHook_FirstMatchGet_ThenConfirm(t *testing.T) {
+	db := setupEngineTestDB(t)
+	cfg := setupMockConfig() // BSC requires 3 confirmations
+	mockDisp := &mockDualPhaseDispatcher{}
+	engine := NewMatcherEngine(db, cfg, mockDisp)
+
+	targetAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+
+	// Case 1: First match with insufficient confirmations -> triggers "get" only
+	intent1 := model.PaymentIntent{
+		ID:             "intent_dual_001",
+		OrderID:        "ord_dual_001",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("20.000100"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent1).Error)
+
+	transfer1 := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_dual_1",
+		0,
+		"0xpayer",
+		targetAddr,
+		"20000100",
+		100,
+	)
+	transfer1.Token = model.TokenUSDT
+	transfer1.Amount = decimal.RequireFromString("20.000100")
+	transfer1.BlockTimestamp = time.Now().Unix()
+
+	// Block height 100 -> confirmations = 100 - 100 + 1 = 1 (required = 3)
+	err := engine.ProcessTransfer(transfer1, 100)
+	require.NoError(t, err)
+
+	events1 := mockDisp.GetEvents()
+	require.Len(t, events1, 1, "未达确认数首次匹配时应且仅分发 1 个 get 事件")
+	assert.Equal(t, queue.WebhookEventGet, events1[0].Event)
+	assert.Equal(t, "ord_dual_001", events1[0].OrderID)
+	assert.Equal(t, uint64(1), events1[0].Confirmations)
+	assert.Equal(t, uint64(3), events1[0].RequiredConfirmations)
+
+	var savedIntent1 model.PaymentIntent
+	require.NoError(t, db.Where("order_id = ?", "ord_dual_001").First(&savedIntent1).Error)
+	assert.Equal(t, model.StatusConfirming, savedIntent1.Status)
+	assert.NotNil(t, savedIntent1.DetectedAt)
+
+	// Case 2: First match with already sufficient confirmations -> triggers "get" then "confirm"
+	intent2 := model.PaymentIntent{
+		ID:             "intent_dual_002",
+		OrderID:        "ord_dual_002",
+		Chain:          model.ChainBsc,
+		Token:          model.TokenUSDT,
+		TargetAddress:  targetAddr,
+		ExpectedAmount: decimal.RequireFromString("30.000100"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, db.Create(&intent2).Error)
+
+	transfer2 := model.NewChainTransfer(
+		model.ChainBsc,
+		"0xhash_dual_2",
+		0,
+		"0xpayer",
+		targetAddr,
+		"30000100",
+		100,
+	)
+	transfer2.Token = model.TokenUSDT
+	transfer2.Amount = decimal.RequireFromString("30.000100")
+	transfer2.BlockTimestamp = time.Now().Unix()
+
+	// Block height 110 -> confirmations = 110 - 100 + 1 = 11 (required = 3)
+	err = engine.ProcessTransfer(transfer2, 110)
+	require.NoError(t, err)
+
+	// Wait briefly for goroutine sending confirm after get
+	time.Sleep(300 * time.Millisecond)
+
+	events2 := mockDisp.GetEvents()
+	// events1 has 1, so events2 should have 1 + 2 = 3
+	require.Len(t, events2, 3, "即刻满足确认数时应先后触发 get 与 confirm 两个事件")
+	assert.Equal(t, queue.WebhookEventGet, events2[1].Event)
+	assert.Equal(t, "ord_dual_002", events2[1].OrderID)
+	assert.Equal(t, queue.WebhookEventConfirm, events2[2].Event)
+	assert.Equal(t, "ord_dual_002", events2[2].OrderID)
 }
 
 

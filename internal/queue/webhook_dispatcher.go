@@ -22,16 +22,23 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	WebhookEventGet     = "get"
+	WebhookEventConfirm = "confirm"
+)
+
 type WebhookPayload struct {
-	Event          string          `json:"event"`
-	OrderID        string          `json:"orderId"`
-	Chain          model.Chain     `json:"chain"`
-	Token          model.Token     `json:"token"`
-	TargetAddress  string          `json:"targetAddress"`
-	Amount         decimal.Decimal `json:"amount"`
-	TxHash         string          `json:"txHash"`
-	BlockTimestamp int64           `json:"blockTimestamp"`
-	Timestamp      string          `json:"timestamp"`
+	Event                 string          `json:"event"`
+	OrderID               string          `json:"orderId"`
+	Chain                 model.Chain     `json:"chain"`
+	Token                 model.Token     `json:"token"`
+	TargetAddress         string          `json:"targetAddress"`
+	Amount                decimal.Decimal `json:"amount"`
+	TxHash                string          `json:"txHash"`
+	BlockTimestamp        int64           `json:"blockTimestamp"`
+	Confirmations         uint64          `json:"confirmations,omitempty"`
+	RequiredConfirmations uint64          `json:"requiredConfirmations,omitempty"`
+	Timestamp             string          `json:"timestamp"`
 }
 
 type WebhookDispatcher struct {
@@ -142,15 +149,20 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 	}
 
 	for _, l := range pendingLogs {
-		var successCount int64
-		w.db.Model(&model.WebhookLog{}).Where("order_id = ? AND success = ?", l.OrderID, true).Count(&successCount)
-		if successCount > 0 {
+		var payload WebhookPayload
+		if err := json.Unmarshal([]byte(l.Payload), &payload); err != nil {
 			w.db.Model(&l).Update("next_retry_at", nil)
 			continue
 		}
 
-		var payload WebhookPayload
-		if err := json.Unmarshal([]byte(l.Payload), &payload); err != nil {
+		event := l.Event
+		if event == "" {
+			event = payload.Event
+		}
+
+		var successCount int64
+		w.db.Model(&model.WebhookLog{}).Where("order_id = ? AND event = ? AND success = ?", l.OrderID, event, true).Count(&successCount)
+		if successCount > 0 {
 			w.db.Model(&l).Update("next_retry_at", nil)
 			continue
 		}
@@ -163,28 +175,39 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 			continue // 已被并发消费，跳过
 		}
 
-		log.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, NextAttempt=%d", l.OrderID, l.Attempt+1)
+		log.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, Event=%s, NextAttempt=%d", l.OrderID, event, l.Attempt+1)
 		w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, l.Attempt+1)
 	}
 }
 
-// DispatchAsync enqueues an asynchronous webhook delivery attempt
-func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash string, blockTimestamp int64) {
+// DispatchEventAsync enqueues an asynchronous webhook delivery attempt with a specific event type (e.g., "get" or "confirm")
+func (w *WebhookDispatcher) DispatchEventAsync(event string, intent *model.PaymentIntent, txHash string, blockTimestamp int64, confirmations, requiredConfirmations uint64) {
 	go func() {
 		payload := WebhookPayload{
-			Event:          "PAYMENT_SUCCESS",
-			OrderID:        intent.OrderID,
-			Chain:          intent.Chain,
-			Token:          intent.Token,
-			TargetAddress:  intent.TargetAddress,
-			Amount:         intent.ReceivedAmount,
-			TxHash:         txHash,
-			BlockTimestamp: blockTimestamp,
-			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+			Event:                 event,
+			OrderID:               intent.OrderID,
+			Chain:                 intent.Chain,
+			Token:                 intent.Token,
+			TargetAddress:         intent.TargetAddress,
+			Amount:                intent.ReceivedAmount,
+			TxHash:                txHash,
+			BlockTimestamp:        blockTimestamp,
+			Confirmations:         confirmations,
+			RequiredConfirmations: requiredConfirmations,
+			Timestamp:             time.Now().UTC().Format(time.RFC3339),
 		}
 
 		w.DeliverWithRetry(intent.OrderID, intent.WebhookURL, payload, 1)
 	}()
+}
+
+// DispatchAsync enqueues an asynchronous webhook delivery attempt (defaults to "confirm" event for backward compatibility)
+func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash string, blockTimestamp int64) {
+	required := uint64(0)
+	if w.cfg != nil {
+		required = w.cfg.GetRequiredConfirmations(intent.Chain)
+	}
+	w.DispatchEventAsync(WebhookEventConfirm, intent, txHash, blockTimestamp, intent.Confirmations, required)
 }
 
 // DeliverWithRetry sends the payload and registers retry schedule in DB (handled exclusively by StartRetryWorker)
@@ -207,7 +230,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	req.Header.Set("X-Signature-SHA256", sig)
 	req.Header.Set("User-Agent", "CrypDog-Webhook-Guardian/1.0")
 
-	log.Printf("[Webhook] Sending notification to %s (Order: %s, Attempt: %d)", webhookURL, orderID, attempt)
+	log.Printf("[Webhook] Sending notification to %s (Order: %s, Event: %s, Attempt: %d)", webhookURL, orderID, payload.Event, attempt)
 
 	startTime := time.Now()
 	resp, err := w.client.Do(req)
@@ -215,6 +238,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	webhookLog := model.WebhookLog{
 		OrderID:    orderID,
+		Event:      payload.Event,
 		WebhookURL: webhookURL,
 		Payload:    string(jsonBytes),
 		Signature:  sig,

@@ -1,13 +1,14 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"crypdog/internal/engine"
+	"crypdog/internal/lock"
 	"crypdog/internal/logger"
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
@@ -29,11 +30,17 @@ var (
 type IntentService struct {
 	db          *gorm.DB
 	poolManager *engine.MicroAmountManager
-	mu          sync.Mutex
+	locker      lock.Locker
 }
 
-func NewIntentService(db *gorm.DB, pool *engine.MicroAmountManager) *IntentService {
-	return &IntentService{db: db, poolManager: pool}
+func NewIntentService(db *gorm.DB, pool *engine.MicroAmountManager, lockers ...lock.Locker) *IntentService {
+	var l lock.Locker
+	if len(lockers) > 0 && lockers[0] != nil {
+		l = lockers[0]
+	} else {
+		l = lock.NewKeyedMutexLocker()
+	}
+	return &IntentService{db: db, poolManager: pool, locker: l}
 }
 
 type RegisterDTO struct {
@@ -48,8 +55,15 @@ type RegisterDTO struct {
 
 // RegisterOrReactivate 封装完整的订单创建、重激活与幂等状态机
 func (s *IntentService) RegisterOrReactivate(dto RegisterDTO) (*model.PaymentIntent, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	normChain := model.NormalizeChain(string(dto.Chain))
+	dto.Chain = normChain
+
+	allocKey := fmt.Sprintf("alloc:%s:%s", normChain, dto.Token)
+	allocUnlock, lockErr := s.locker.Acquire(context.Background(), allocKey, 5*time.Second)
+	if lockErr != nil {
+		return nil, false, fmt.Errorf("failed to acquire allocation lock: %w", lockErr)
+	}
+	defer allocUnlock()
 
 	var existing model.PaymentIntent
 	err := s.db.Where("order_id = ?", dto.OrderID).First(&existing).Error
@@ -164,15 +178,19 @@ type AllocateDTO struct {
 
 // AllocateOrReactivate 为订单智能分配唯一微数并注册或重激活监听
 func (s *IntentService) AllocateOrReactivate(dto AllocateDTO) (*model.PaymentIntent, decimal.Decimal, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	normChain := model.NormalizeChain(string(dto.Chain))
+	dto.Chain = normChain
+
+	allocKey := fmt.Sprintf("alloc:%s:%s", normChain, dto.Token)
+	allocUnlock, lockErr := s.locker.Acquire(context.Background(), allocKey, 5*time.Second)
+	if lockErr != nil {
+		return nil, decimal.Zero, false, fmt.Errorf("failed to acquire allocation lock: %w", lockErr)
+	}
+	defer allocUnlock()
 
 	if s.poolManager == nil {
 		return nil, decimal.Zero, false, fmt.Errorf("poolmanager was nil")
 	}
-
-	normChain := model.NormalizeChain(string(dto.Chain))
-	dto.Chain = normChain
 
 	var existing model.PaymentIntent
 	err := s.db.Where("order_id = ?", dto.OrderID).First(&existing).Error
@@ -260,6 +278,12 @@ func (s *IntentService) CancelIntent(idOrOrderID string) (*model.PaymentIntent, 
 	if id == "" {
 		return nil, errors.New("missing orderId or intentId")
 	}
+
+	unlock, lockErr := s.locker.Acquire(context.Background(), fmt.Sprintf("order:%s", id), 5*time.Second)
+	if lockErr != nil {
+		return nil, fmt.Errorf("failed to acquire cancel lock: %w", lockErr)
+	}
+	defer unlock()
 
 	var intent model.PaymentIntent
 	if err := s.db.Where("order_id = ? OR id = ?", id, id).First(&intent).Error; err != nil {

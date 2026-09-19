@@ -1,0 +1,12 @@
+[Unit]
+Description=CrypDog Service
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/crypdog/env
+ExecStart=/usr/local/bin/crypdog
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

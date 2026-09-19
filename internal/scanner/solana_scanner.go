@@ -18,6 +18,7 @@ import (
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var DefaultSolanaTokens = []model.TokenSpec{
@@ -251,16 +252,27 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 	lastSig := s.lastSignatures[queryAddr]
 	s.sigMu.RUnlock()
 
-	// 2. 若内存游标为空且存在 DB，尝试从历史入库流水恢复游标
+	// 2. 若内存游标为空且存在 DB，优先从 ScanProgress 进度表恢复游标
 	if lastSig == "" && s.db != nil {
-		var lastTransfer model.ChainTransfer
+		var progress model.ScanProgress
 		if err := s.db.WithContext(ctx).
-			Where("chain = ? AND (target_address = ? OR target_address = ?)", model.ChainSolana, targetOwner, queryAddr).
-			Order("id DESC").First(&lastTransfer).Error; err == nil && lastTransfer.TxHash != "" {
-			lastSig = lastTransfer.TxHash
+			Where("chain = ? AND address = ?", model.ChainSolana, queryAddr).
+			First(&progress).Error; err == nil && progress.LastSignature != "" {
+			lastSig = progress.LastSignature
 			s.sigMu.Lock()
 			s.lastSignatures[queryAddr] = lastSig
 			s.sigMu.Unlock()
+		} else {
+			// 再次尝试从历史入库流水恢复游标
+			var lastTransfer model.ChainTransfer
+			if err := s.db.WithContext(ctx).
+				Where("chain = ? AND (target_address = ? OR target_address = ?)", model.ChainSolana, targetOwner, queryAddr).
+				Order("id DESC").First(&lastTransfer).Error; err == nil && lastTransfer.TxHash != "" {
+				lastSig = lastTransfer.TxHash
+				s.sigMu.Lock()
+				s.lastSignatures[queryAddr] = lastSig
+				s.sigMu.Unlock()
+			}
 		}
 	}
 
@@ -292,10 +304,8 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 	// 4. 冷启动保护：若此前没有任何游标（全新地址首次监听）
 	var cutoff int64
 	if lastSig == "" {
-		// 先将最新签名置为游标水位线，确保后续周期只拉增量
-		s.sigMu.Lock()
-		s.lastSignatures[queryAddr] = allSigs[0].Signature
-		s.sigMu.Unlock()
+		// 先将最新签名置为游标水位线并持久化，确保后续周期只拉增量
+		s.commitSignature(ctx, queryAddr, allSigs[0].Signature)
 
 		// 检查该地址是否有活跃订单创建时间限制
 		if s.db != nil {
@@ -319,9 +329,7 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 		sigInfo := allSigs[i]
 		if sigInfo.Err != nil {
 			// 失败链上交易，跳过并记录游标
-			s.sigMu.Lock()
-			s.lastSignatures[queryAddr] = sigInfo.Signature
-			s.sigMu.Unlock()
+			s.commitSignature(ctx, queryAddr, sigInfo.Signature)
 			continue
 		}
 
@@ -330,9 +338,30 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 			return // 发生错误停止继续推进，保留未处理签名以便下一周期重试
 		}
 
-		s.sigMu.Lock()
-		s.lastSignatures[queryAddr] = sigInfo.Signature
-		s.sigMu.Unlock()
+		s.commitSignature(ctx, queryAddr, sigInfo.Signature)
+	}
+}
+
+// commitSignature 更新内存并在 DB 中原子持久化游标
+func (s *SolanaScanner) commitSignature(ctx context.Context, address, sig string) {
+	if strings.TrimSpace(sig) == "" {
+		return
+	}
+	s.sigMu.Lock()
+	s.lastSignatures[address] = sig
+	s.sigMu.Unlock()
+
+	if s.db != nil {
+		progress := model.ScanProgress{
+			Chain:         model.ChainSolana,
+			Address:       address,
+			LastSignature: sig,
+			UpdatedAt:     time.Now(),
+		}
+		_ = s.db.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "chain"}, {Name: "address"}},
+			DoUpdates: clause.AssignmentColumns([]string{"last_signature", "updated_at"}),
+		}).Create(&progress).Error
 	}
 }
 
@@ -484,6 +513,38 @@ type rpcErr struct {
 	Message string `json:"message"`
 }
 
+
+type solTx struct {
+	Transaction struct {
+		Signatures []string `json:"signatures"`
+		Message    *struct {
+			AccountKeys []interface{} `json:"accountKeys"`
+		} `json:"message,omitempty"`
+	} `json:"transaction"`
+	Slot      uint64 `json:"slot"`
+	BlockTime int64  `json:"blockTime"`
+	Meta      struct {
+		PreTokenBalances  []tokenBalance `json:"preTokenBalances"`
+		PostTokenBalances []tokenBalance `json:"postTokenBalances"`
+	} `json:"meta"`
+}
+
+type tokenBalance struct {
+	AccountIndex  int    `json:"accountIndex"`
+	Mint          string `json:"mint"`
+	Owner         string `json:"owner"` // 当 encoding 为 jsonParsed 时，Solana 会返回所属 owner 地址
+	UiTokenAmount struct {
+		Amount         string `json:"amount"`         // 最小单位的大整数字符串
+		Decimals       int    `json:"decimals"`       // 精度
+		UiAmountString string `json:"uiAmountString"` // 格式化后的小数字符串（推荐用这个转 Decimal）
+	} `json:"uiTokenAmount"`
+}
+
+type solSig struct {
+	Signature string      `json:"signature"`
+	Slot      int64       `json:"slot"`
+	Err       interface{} `json:"err"` // null if successful
+}
 func (s *SolanaScanner) callRPC(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
 	reqBody := rpcReq{
 		JSONRPC: "2.0",
@@ -534,12 +595,6 @@ func (s *SolanaScanner) getSlot(ctx context.Context) (uint64, error) {
 	return slot, nil
 }
 
-type solSig struct {
-	Signature string      `json:"signature"`
-	Slot      int64       `json:"slot"`
-	Err       interface{} `json:"err"` // null if successful
-}
-
 func (s *SolanaScanner) getSignaturesForAddress(ctx context.Context, address, until string, before ...string) ([]solSig, error) {
 	params := []interface{}{address}
 	opts := map[string]interface{}{"limit": 50}
@@ -559,32 +614,6 @@ func (s *SolanaScanner) getSignaturesForAddress(ctx context.Context, address, un
 		return nil, err
 	}
 	return sigs, nil
-}
-
-type solTx struct {
-	Transaction struct {
-		Signatures []string `json:"signatures"`
-		Message    *struct {
-			AccountKeys []interface{} `json:"accountKeys"`
-		} `json:"message,omitempty"`
-	} `json:"transaction"`
-	Slot      uint64 `json:"slot"`
-	BlockTime int64  `json:"blockTime"`
-	Meta      struct {
-		PreTokenBalances  []tokenBalance `json:"preTokenBalances"`
-		PostTokenBalances []tokenBalance `json:"postTokenBalances"`
-	} `json:"meta"`
-}
-
-type tokenBalance struct {
-	AccountIndex  int    `json:"accountIndex"`
-	Mint          string `json:"mint"`
-	Owner         string `json:"owner"` // 当 encoding 为 jsonParsed 时，Solana 会返回所属 owner 地址
-	UiTokenAmount struct {
-		Amount         string `json:"amount"`         // 最小单位的大整数字符串
-		Decimals       int    `json:"decimals"`       // 精度
-		UiAmountString string `json:"uiAmountString"` // 格式化后的小数字符串（推荐用这个转 Decimal）
-	} `json:"uiTokenAmount"`
 }
 
 func (s *SolanaScanner) getTransaction(ctx context.Context, signature string) (*solTx, error) {

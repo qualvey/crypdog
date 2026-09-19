@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
+	"crypdog/internal/lock"
 	"crypdog/internal/logger"
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
@@ -15,13 +16,20 @@ import (
 )
 
 type MicroAmountManager struct {
-	db *gorm.DB
-	mu sync.Mutex
+	db     *gorm.DB
+	locker lock.Locker
 }
 
-func NewMicroAmountManager(db *gorm.DB) *MicroAmountManager {
+func NewMicroAmountManager(db *gorm.DB, lockers ...lock.Locker) *MicroAmountManager {
+	var l lock.Locker
+	if len(lockers) > 0 && lockers[0] != nil {
+		l = lockers[0]
+	} else {
+		l = lock.NewKeyedMutexLocker()
+	}
 	return &MicroAmountManager{
-		db: db,
+		db:     db,
+		locker: l,
 	}
 }
 
@@ -35,14 +43,17 @@ var (
 // AllocateUniqueAmount finds and reserves the smallest unassigned micro-amount for a given (chain, token, baseAmount) scope.
 // If the first wallet has all tail slots occupied, it automatically falls back to subsequent available wallets in the pool.
 func (m *MicroAmountManager) AllocateUniqueAmount(chain model.Chain, token model.Token, baseAmount decimal.Decimal) (string, decimal.Decimal, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	normChain := model.NormalizeChain(string(chain))
+	lockKey := fmt.Sprintf("alloc:%s:%s", normChain, token)
+	unlock, err := m.locker.Acquire(context.Background(), lockKey, 5*time.Second)
+	if err != nil {
+		return "", decimal.Zero, fmt.Errorf("failed to acquire allocation lock: %w", err)
+	}
+	defer unlock()
 	rawChain := strings.ToUpper(strings.TrimSpace(string(chain)))
 
 	var wallets []model.WalletAddress
-	err := m.db.Where("(chain = ? OR chain = ?) AND enabled = ?", normChain, rawChain, true).
+	err = m.db.Where("(chain = ? OR chain = ?) AND enabled = ?", normChain, rawChain, true).
 		Order("last_used_at ASC"). // 轮换策略：优先使用最久未使用的地址
 		Find(&wallets).Error
 	if err != nil || len(wallets) == 0 {

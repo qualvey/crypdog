@@ -87,7 +87,7 @@ func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.ChainNodeConfig) 
 		chain:          Chain,
 		db:             db,
 		cfg:            cfg,
-		client:         *NewEvmRPCClient(cfg.RPCURL),
+		client:         *NewEvmRPCClient(cfg.RPCURL, cfg.BackupRPCURLs...),
 		wallets:        make(map[string]struct{}),
 		tokens:         make(map[string]model.TokenSpec),
 		blockTimeCache: make(map[uint64]int64),
@@ -237,7 +237,7 @@ func (e *EvmScanner) initCursor(ctx context.Context) error {
 		// 1. 优先尝试从 DB 进度表中加载上次落库断点
 		var progress model.ScanProgress
 		err := e.db.WithContext(ctx).
-			Where("chain = ?", e.Chain()).
+			Where("chain = ? AND (address = '' OR address IS NULL)", e.Chain()).
 			First(&progress).Error
 
 		if err == nil && progress.LastScannedBlock > 0 {
@@ -416,11 +416,12 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 func (e *EvmScanner) commitProgress(ctx context.Context, toBlock uint64) error {
 	progress := model.ScanProgress{
 		Chain:            e.Chain(),
+		Address:          "",
 		LastScannedBlock: toBlock,
 		UpdatedAt:        time.Now(),
 	}
 	err := e.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "chain"}},
+		Columns:   []clause.Column{{Name: "chain"}, {Name: "address"}},
 		DoUpdates: clause.AssignmentColumns([]string{"last_scanned_block", "updated_at"}),
 	}).Create(&progress).Error
 

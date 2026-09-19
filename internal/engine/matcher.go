@@ -12,6 +12,7 @@ import (
 	"crypdog/internal/config"
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
+	"crypdog/internal/queue"
 
 	"github.com/shopspring/decimal"
 
@@ -21,6 +22,7 @@ import (
 
 type WebhookDispatcher interface {
 	DispatchAsync(intent *model.PaymentIntent, txHash string, timestamp int64)
+	DispatchEventAsync(event string, intent *model.PaymentIntent, txHash string, timestamp int64, confirmations, requiredConfirmations uint64)
 }
 
 type TxVerifierFunc func(ctx context.Context, chain model.Chain, txHash string, blockNumber uint64) (bool, error)
@@ -55,14 +57,22 @@ func (e *MatcherEngine) ProcessTransfer(transfer model.ChainTransfer, currentBlo
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// 1. 流水落库与排重
-	isNew, err := e.recordTransferIfNotExists(&transfer)
-	if err != nil {
-		return fmt.Errorf("record transfer error: %w", err)
-	}
-	if !isNew {
-		// 显式直接返回 nil，语义清晰：已存在流水安全忽略，不再向下撮合
-		return nil
+	// 1. 流水落库与排重：兼容 Scanner 预落库架构
+	// 若该流水已存在且已经成功撮合过订单 (matched_order_id != "")，则安全忽略
+	var existing model.ChainTransfer
+	err := e.db.Where("chain = ? AND tx_hash = ? AND log_index = ?", transfer.Chain, transfer.TxHash, transfer.LogIndex).First(&existing).Error
+	if err == nil {
+		if existing.MatchedOrderID != "" {
+			// 已被撮合结算过的流水，幂等忽略
+			return nil
+		}
+		// 数据库中已有流水（如 Scanner 提前持久化），但尚未撮合订单，使用数据库主键 ID 继续撮合
+		transfer.ID = existing.ID
+	} else {
+		// 尚无此流水记录，落库保存
+		if err := e.db.Create(&transfer).Error; err != nil {
+			return fmt.Errorf("record transfer error: %w", err)
+		}
 	}
 
 	return e.matchAndSettle(&transfer, currentBlockNumber)
@@ -177,6 +187,10 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 		}
 	}
 
+	if intent.DetectedAt == nil {
+		intent.DetectedAt = &now
+	}
+
 	if isPaid {
 		intent.Status = model.StatusPaid
 		intent.PaidAt = &now
@@ -201,9 +215,18 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 		return err
 	}
 
-	// 成功且已确认，异步触发通知
-	if isPaid && e.dispatcher != nil {
-		e.dispatcher.DispatchAsync(intent, transfer.TxHash, transfer.BlockTimestamp)
+	// 双段 Hook 触发：
+	// 1. 首次匹配到充值流水，立即分发 "get" 事件
+	// 2. 若当前已满足所需确认数 (isPaid)，紧随其后分发 "confirm" 事件
+	if e.dispatcher != nil {
+		e.dispatcher.DispatchEventAsync(queue.WebhookEventGet, intent, transfer.TxHash, transfer.BlockTimestamp, confirmations, required)
+		if isPaid {
+			go func() {
+				// 略微让出时间片，确保网络层接收端按时序先收到 get 再收到 confirm
+				time.Sleep(200 * time.Millisecond)
+				e.dispatcher.DispatchEventAsync(queue.WebhookEventConfirm, intent, transfer.TxHash, transfer.BlockTimestamp, confirmations, required)
+			}()
+		}
 	}
 
 	return nil

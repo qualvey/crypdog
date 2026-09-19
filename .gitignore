@@ -1,6 +1,9 @@
 config.yaml
 *.db
 *.exe
+crypdog
+server
+.env
 /demo
 /dist
 *mermaid_test*

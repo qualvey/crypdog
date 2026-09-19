@@ -146,8 +146,8 @@ func (w *ConfirmationWorker) checkConfirmations() {
 				blockTs = transfer.BlockTimestamp
 			}
 
-			// Trigger Webhook callback
-			w.dispatcher.DispatchAsync(&intent, intent.TxHash, blockTs)
+			// Trigger Webhook callback: 次段 confirm
+			w.dispatcher.DispatchEventAsync(WebhookEventConfirm, &intent, intent.TxHash, blockTs, confirmations, required)
 		} else if confirmations != intent.Confirmations {
 			// Update intermediate confirmation count (仅当状态仍为 CONFIRMING 时更新)
 			w.db.Model(&model.PaymentIntent{}).

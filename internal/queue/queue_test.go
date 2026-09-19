@@ -2,6 +2,7 @@ package queue_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -146,4 +147,135 @@ func TestWebhookDispatcher_NoDualTrigger(t *testing.T) {
 	require.Len(t, logs, 1)
 	assert.False(t, logs[0].Success)
 	assert.NotNil(t, logs[0].NextRetryAt)
+}
+
+func TestConfirmationWorker_DispatchesConfirmEvent(t *testing.T) {
+	db := setupQueueTestDB(t)
+
+	var receivedPayloads []queue.WebhookPayload
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p queue.WebhookPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		receivedPayloads = append(receivedPayloads, p)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+
+	cfg := &config.Config{
+		Chains: map[model.Chain]config.ChainNodeConfig{
+			model.ChainArbitrum: {Confirmations: 3},
+		},
+		Webhook: config.WebhookConfig{
+			Secret:     "secret",
+			TimeoutSec: 2,
+			AllowLocal: true,
+		},
+	}
+
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+	heightProvider := func(chain model.Chain) uint64 {
+		return 100 // 100 - 95 + 1 = 6 >= 3
+	}
+
+	worker := queue.NewConfirmationWorker(db, cfg, dispatcher, heightProvider)
+
+	now := time.Now()
+	intent := model.PaymentIntent{
+		ID:             "intent_worker_confirm",
+		OrderID:        "ord_worker_confirm",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		TargetAddress:  "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		ExpectedAmount: decimal.NewFromFloat(10.0001),
+		ReceivedAmount: decimal.NewFromFloat(10.0001),
+		Status:         model.StatusConfirming,
+		BlockNumber:    95,
+		Confirmations:  1,
+		TxHash:         "mock_tx_confirm_event",
+		LogIndex:       0,
+		WebhookURL:     mockServer.URL,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, db.Create(&intent).Error)
+
+	transfer := model.ChainTransfer{
+		TxHash:         "mock_tx_confirm_event",
+		Chain:          model.ChainArbitrum,
+		LogIndex:       0,
+		TargetAddress:  "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+		Amount:         decimal.NewFromFloat(10.0001),
+		BlockNumber:    95,
+		BlockTimestamp: now.Unix(),
+	}
+	require.NoError(t, db.Create(&transfer).Error)
+
+	workerCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	worker.StartWorker(workerCtx, 50*time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
+
+	var updatedIntent model.PaymentIntent
+	require.NoError(t, db.Where("id = ?", intent.ID).First(&updatedIntent).Error)
+	assert.Equal(t, model.StatusPaid, updatedIntent.Status)
+
+	require.Len(t, receivedPayloads, 1)
+	assert.Equal(t, queue.WebhookEventConfirm, receivedPayloads[0].Event)
+	assert.Equal(t, "ord_worker_confirm", receivedPayloads[0].OrderID)
+	assert.Equal(t, uint64(6), receivedPayloads[0].Confirmations)
+	assert.Equal(t, uint64(3), receivedPayloads[0].RequiredConfirmations)
+}
+
+func TestWebhookDispatcher_IndependentEventRetries(t *testing.T) {
+	db := setupQueueTestDB(t)
+	cfg := &config.Config{
+		Webhook: config.WebhookConfig{
+			Secret:     "secret",
+			TimeoutSec: 2,
+			AllowLocal: true,
+		},
+	}
+	dispatcher := queue.NewWebhookDispatcher(db, cfg)
+
+	orderID := "ord_independent_retry"
+
+	// 1. 模拟一笔已成功的 "get" 日志
+	getLog := model.WebhookLog{
+		OrderID:    orderID,
+		Event:      queue.WebhookEventGet,
+		WebhookURL: "http://example.com/webhook",
+		Payload:    `{"event":"get","orderId":"ord_independent_retry"}`,
+		Signature:  "sig1",
+		StatusCode: 200,
+		Success:    true,
+		Attempt:    1,
+		CreatedAt:  time.Now(),
+	}
+	require.NoError(t, db.Create(&getLog).Error)
+
+	// 2. 模拟一笔失败待重试的 "confirm" 日志
+	retryTime := time.Now().Add(-1 * time.Minute)
+	confirmLog := model.WebhookLog{
+		OrderID:     orderID,
+		Event:       queue.WebhookEventConfirm,
+		WebhookURL:  "http://example.com/webhook",
+		Payload:     `{"event":"confirm","orderId":"ord_independent_retry"}`,
+		Signature:   "sig2",
+		StatusCode:  500,
+		Success:     false,
+		Attempt:     1,
+		NextRetryAt: &retryTime,
+		CreatedAt:   time.Now().Add(-2 * time.Minute),
+	}
+	require.NoError(t, db.Create(&confirmLog).Error)
+
+	// 3. 验证数据库中 get 与 confirm 独立
+	var count int64
+	require.NoError(t, db.Model(&model.WebhookLog{}).Where("order_id = ? AND event = ? AND success = ?", orderID, queue.WebhookEventGet, true).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+
+	require.NoError(t, db.Model(&model.WebhookLog{}).Where("order_id = ? AND event = ? AND success = ?", orderID, queue.WebhookEventConfirm, true).Count(&count).Error)
+	assert.Equal(t, int64(0), count, "confirm 事件尚未成功，不得被 get 事件误伤判定为成功")
+	_ = dispatcher
 }

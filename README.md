@@ -145,25 +145,47 @@ Content-Type: application/json
 
 ---
 
-## 🔔 Webhook 回调规范
+## 🔔 双段 Webhook 回调规范 (Dual-Phase Webhook)
 
-当满足确认数后，CrypDog 主动向主业务服务器的 `webhookUrl` 发送 `POST` 回调。
+CrypDog 采用**双段 Webhook 机制**向主业务服务器的 `webhookUrl` 发送 `POST` 回调：
+1. **充值捕获 (`get`)**：当首次在链上匹配到该订单的转账流水时立即发送，便于业务系统将订单置为“已收到转账，等待确认”；
+2. **确认达成 (`confirm`)**：当交易达到所属公链设定的区块确认深度后发送，驱动业务系统完成最终订单核销与自动履约交付。
 
 ### 安全请求头：
 - `X-Signature-SHA256`: `hex(HMAC_SHA256(request_body, SHARED_WEBHOOK_SECRET))`
+- `User-Agent`: `CrypDog-Webhook-Guardian/1.0`
 
-### 回调报文 (Payload)：
+### 1. 充值初次捕获报文 (`event: get`)
 ```json
 {
-  "event": "PAYMENT_SUCCESS",
+  "event": "get",
   "orderId": "ORD-2026-001",
   "chain": "ARBITRUM",
   "token": "USDC",
   "targetAddress": "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
   "amount": 10.0001,
   "txHash": "0xd6cac508baf973a...",
-  "blockTimestamp": 1788728210788,
+  "blockTimestamp": 1788728210,
+  "confirmations": 1,
+  "requiredConfirmations": 12,
   "timestamp": "2026-09-06T21:05:12Z"
+}
+```
+
+### 2. 区块确认达标报文 (`event: confirm`)
+```json
+{
+  "event": "confirm",
+  "orderId": "ORD-2026-001",
+  "chain": "ARBITRUM",
+  "token": "USDC",
+  "targetAddress": "0x7BDc49542978B16566e82c8f90DB1EB03804C675",
+  "amount": 10.0001,
+  "txHash": "0xd6cac508baf973a...",
+  "blockTimestamp": 1788728210,
+  "confirmations": 12,
+  "requiredConfirmations": 12,
+  "timestamp": "2026-09-06T21:07:36Z"
 }
 ```
 

@@ -239,9 +239,13 @@ sequenceDiagram
 
 ---
 
-### 2.4 Webhook 可靠回调与指数退避重试 (Webhook Delivery & Exponential Backoff)
+### 2.4 双段 Webhook 可靠回调与指数退避重试 (Dual-Phase Webhook Delivery & Exponential Backoff)
 
-当支付达成，系统发送带有 `HMAC-SHA256` 签名的通知给商户回调地址。商户验签后完成发货；若商户响应异常，启动最多 5 次指数退避重试。
+CrypDog 采用双段 Webhook 架构：
+1. **初次捕获 (Phase 1: `get`)**：当链上首次撮合到充值流水时立即发送，携带最新哈希与当前确认数；
+2. **确认达成 (Phase 2: `confirm`)**：当区块确认数达成后再次发送，驱动商户完成核销发货。
+
+每段通知均带有独立签名的 `HMAC-SHA256`。若商户响应异常，启动最多 5 次指数退避持久化重试。
 
 ```mermaid
 sequenceDiagram
@@ -249,12 +253,15 @@ sequenceDiagram
     participant Dispatcher as Webhook 分发器
     participant Merchant as 商户接收端 (Merchant Webhook URL)
     participant DB as 数据库 (WebhookLog)
-    participant Timer as 定时器任务 (time.AfterFunc)
 
-    Dispatcher->>Dispatcher: 构造 WebhookPayload (PAYMENT_SUCCESS)
-    Dispatcher->>Dispatcher: 计算 X-Signature-SHA256 = HMAC_SHA256(payload, secret)
+    Note over Dispatcher: Phase 1: 首次匹配流水
+    Dispatcher->>Dispatcher: 构造 WebhookPayload (event: "get")
+    Dispatcher->>Merchant: POST {webhookUrl} [get]<br/>Header: X-Signature-SHA256
+    Merchant-->>Dispatcher: 200 OK (已捕获充值，等待确认)
 
-    Dispatcher->>Merchant: POST {webhookUrl} [Attempt 1]<br/>Header: X-Signature-SHA256
+    Note over Dispatcher: Phase 2: 区块确认数达标
+    Dispatcher->>Dispatcher: 构造 WebhookPayload (event: "confirm")
+    Dispatcher->>Merchant: POST {webhookUrl} [confirm]<br/>Header: X-Signature-SHA256
     
     alt 商户返回 2xx (成功)
         Merchant-->>Dispatcher: 200 OK
