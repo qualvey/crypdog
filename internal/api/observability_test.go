@@ -21,7 +21,7 @@ import (
 func setupTestRouter(t *testing.T) (*gorm.DB, http.Handler) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)
-	_ = db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{})
+	_ = db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{})
 
 	metrics.InitMetrics()
 
@@ -191,7 +191,7 @@ func TestCancelIntentEndpoints(t *testing.T) {
 func TestIntentHandler_GetPaymentOptions(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)
-	assert.NoError(t, db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}))
+	assert.NoError(t, db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{}))
 
 	falseVal := false
 	trueVal := true

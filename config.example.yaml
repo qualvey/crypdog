@@ -1,15 +1,20 @@
-server_port: "8080"
-service_secret: "crypdog-secret-key-123456"
-webhook_secret: "crypdog-webhook-secret-987654"
-scan_interval_sec: 5
+env: "development" # "development" 或 "production" (生产环境将强制启用密钥防弱口令及安全防御校验)
+
+server:
+  port: "8080"
+  secret: "crypdog-secret-key-123456"
+  enable_simulation: false # 模拟入账测试接口总开关，生产环境必须且强制为 false
 
 webhook:
   webhook_secret: "crypdog-webhook-secret-987654"
+  max_retries: 3
+  timeout_sec: 5
   allow_local: true # 本地开发/联调设为 true，允许 localhost/127.0.0.1 闭环回调；生产环境设为 false 防 SSRF
 
 database:
   driver: "sqlite" # "sqlite" 或 "postgres"
   dsn: "crypdog.db"
+
 log:
   level: "info"       # "debug" | "info" | "warn" | "error"
   format: "text"      # "text" 或 "json"
@@ -26,25 +31,30 @@ pprof:
 # 针对各区块链节点的通信配置
 chains:
   TRON:
+    enabled: false
     driver: "tron"
     rpc_url: "https://api.trongrid.io"
     api_key: ""
     confirmations: 19
   BSC:
+    enabled: false
     driver: "evm"
     rpc_url: "https://binance.llamarpc.com"
     confirmations: 15
   ARBITRUM:
+    enabled: true
     driver: "evm"
     rpc_url: "https://arb1.arbitrum.io/rpc"
     batch_size: 500
     block_delay: 20
     confirmations: 10
   POLYGON:
+    enabled: false
     driver: "evm"
     rpc_url: "https://polygon-rpc.com"
     confirmations: 128
   SOLANA:
+    enabled: true
     driver: "solana"
     rpc_url: "https://api.mainnet-beta.solana.com"
     confirmations: 32
@@ -57,3 +67,9 @@ initial_wallets:
   - chain: "BSC"
     address: "0x71C83664204CB356015E178d721978E2b0C8976F"
     label: "BSC Hot Wallet 01"
+  - chain: "ARBITRUM"
+    address: "0x7BDc49542978B16566e82c8f90DB1EB03804C675"
+    label: "Arbitrum Hot Wallet 01"
+  - chain: "SOLANA"
+    address: "7MxJZrsY8FszFQnehZ8Nhhp8N7Zn6gpNLFViLKWLiz98"
+    label: "Solana Hot Wallet 01"

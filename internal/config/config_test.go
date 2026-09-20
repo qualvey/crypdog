@@ -120,3 +120,22 @@ func TestConfig_ValidateProduction(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+func TestConfig_LoadFiles(t *testing.T) {
+	t.Run("load config.yaml", func(t *testing.T) {
+		cfg, err := LoadConfig("../../config.yaml")
+		assert.NoError(t, err)
+		assert.NotNil(t, cfg)
+		assert.Equal(t, "8080", cfg.Server.Port)
+		assert.Equal(t, "crypdog-secret-key-123456", cfg.Server.Secret)
+		assert.NotEmpty(t, cfg.Chains)
+	})
+
+	t.Run("load config.example.yaml", func(t *testing.T) {
+		cfg, err := LoadConfig("../../config.example.yaml")
+		assert.NoError(t, err)
+		assert.NotNil(t, cfg)
+		assert.Equal(t, "8080", cfg.Server.Port)
+		assert.Equal(t, "crypdog-secret-key-123456", cfg.Server.Secret)
+		assert.NotEmpty(t, cfg.Chains)
+	})
+}

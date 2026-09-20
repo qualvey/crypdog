@@ -11,19 +11,14 @@ import (
 
 // Config 根配置结构体
 type Config struct {
-	Env               string         `yaml:"env" env:"APP_ENV" env-default:"development"`
-	ServerPort        string         `yaml:"server_port"`
-	ServiceSecret     string         `yaml:"service_secret"`
-	WebhookSecret     string         `yaml:"webhook_secret"`
-	WebhookAllowLocal *bool          `yaml:"webhook_allow_local"`
-	Server            ServerConfig   `yaml:"server"`
-	ScanIntervalSec   int            `yaml:"scan_interval_sec" env:"SCAN_INTERVAL_SEC" env-default:"5"`
-	Webhook           WebhookConfig  `yaml:"webhook"`
-	Database          DatabaseConfig `yaml:"database"`
-	Monitor           MonitorConfig  `yaml:"monitor"`
-	Log               LogConfig      `yaml:"log"`
-	Metrics           MetricsConfig  `yaml:"metrics"`
-	Pprof             PprofConfig    `yaml:"pprof"`
+	Env      string         `yaml:"env" env:"APP_ENV" env-default:"development"`
+	Server   ServerConfig   `yaml:"server"`
+	Webhook  WebhookConfig  `yaml:"webhook"`
+	Database DatabaseConfig `yaml:"database"`
+	Monitor  MonitorConfig  `yaml:"monitor"`
+	Log      LogConfig      `yaml:"log"`
+	Metrics  MetricsConfig  `yaml:"metrics"`
+	Pprof    PprofConfig    `yaml:"pprof"`
 	//全大写
 	Chains         map[model.Chain]ChainNodeConfig `yaml:"chains"`
 	InitialWallets []InitialWallet                 `yaml:"initial_wallets"`
@@ -63,12 +58,12 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Port             string `yaml:"server_port" env:"SERVER_PORT" env-default:"8080"`
-	Secret           string `yaml:"service_secret" env:"SERVICE_SECRET_KEY" env-default:"crypdog-secret-key-123456"`
-	EnableSimulation bool   `yaml:"enable_simulation" env:"ENABLE_SIMULATION" env-default:"false"`
+	Port             string `yaml:"port" env:"CRYPDOG_PORT" env-default:"8080"`
+	Secret           string `yaml:"secret" env:"CRYPDOG_SECRET" env-default:"crypdog-secret-key-123456"`
+	EnableSimulation bool   `yaml:"enable_simulation" env:"CRYPDOG_ENABLE_SIMULATION" env-default:"false"`
 }
 type WebhookConfig struct {
-	Secret     string `yaml:"webhook_secret" env:"SHARED_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
+	Secret     string `yaml:"webhook_secret" env:"CRYPDOG_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
 	MaxRetries int    `yaml:"max_retries" env-default:"3"`
 	TimeoutSec int    `yaml:"timeout_sec" env-default:"5"`
 	AllowLocal bool   `yaml:"allow_local" env:"WEBHOOK_ALLOW_LOCAL" env-default:"false"`
@@ -134,19 +129,6 @@ func LoadConfig(configPath ...string) (*Config, error) {
 		if err := cleanenv.ReadEnv(&cfg); err != nil {
 			return nil, fmt.Errorf("解析环境变量配置失败: %w", err)
 		}
-	}
-
-	if cfg.ServerPort != "" {
-		cfg.Server.Port = cfg.ServerPort
-	}
-	if cfg.ServiceSecret != "" {
-		cfg.Server.Secret = cfg.ServiceSecret
-	}
-	if cfg.WebhookSecret != "" {
-		cfg.Webhook.Secret = cfg.WebhookSecret
-	}
-	if cfg.WebhookAllowLocal != nil {
-		cfg.Webhook.AllowLocal = *cfg.WebhookAllowLocal
 	}
 
 	// 3. 生产就绪校验

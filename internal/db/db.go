@@ -49,6 +49,7 @@ func InitDB(cfg *config.Config) *gorm.DB {
 		&model.WebhookLog{},
 		&model.WalletAddress{},
 		&model.ScanProgress{},
+		&model.ChainToken{},
 	)
 	if err != nil {
 		log.Fatalf("Failed to auto-migrate database schema: %v", err)
@@ -56,7 +57,8 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	log.Println("Database auto-migration completed successfully")
 
-	// Seed initial wallets if configured
+	// 播种初始默认代币与收款钱包
+	seedInitialTokens(DB)
 	seedInitialWallets(DB, cfg.InitialWallets)
 
 	sqlDB, err := DB.DB()
@@ -73,21 +75,31 @@ func InitDB(cfg *config.Config) *gorm.DB {
 	return DB
 }
 
+func seedInitialTokens(database *gorm.DB) {
+	defaultTokens := model.GetDefaultChainTokens()
+
+	for _, t := range defaultTokens {
+		t.CreatedAt = time.Now()
+		t.UpdatedAt = time.Now()
+		database.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "chain"}, {Name: "symbol"}},
+			DoNothing: true,
+		}).Create(&t)
+	}
+}
+
 func seedInitialWallets(database *gorm.DB, wallets []config.InitialWallet) {
 	if len(wallets) == 0 {
 		return
 	}
 
-	chainAddrsMap := make(map[model.Chain][]string)
 	for _, w := range wallets {
 		addr := strings.TrimSpace(w.Address)
 		if addr == "" || strings.TrimSpace(w.Chain) == "" {
 			continue
 		}
 		normChain := model.NormalizeChain(w.Chain)
-		chainAddrsMap[normChain] = append(chainAddrsMap[normChain], addr)
 
-		// 1. 配置中存在的地址：更新或插入，确保 enabled = true
 		wallet := model.WalletAddress{
 			Chain:     normChain,
 			Address:   addr,
@@ -95,20 +107,9 @@ func seedInitialWallets(database *gorm.DB, wallets []config.InitialWallet) {
 			Enabled:   true,
 			UpdatedAt: time.Now(),
 		}
-		// 使用 OnConflict 在 (chain, address) 已存在时恢复 enabled = true 并更新 label
 		database.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "chain"}, {Name: "address"}},
 			DoUpdates: clause.AssignmentColumns([]string{"enabled", "label", "updated_at"}),
 		}).Create(&wallet)
-	}
-
-	// 2. 关键：仅针对本次配置中涉及的公链，不在配置列表里的旧地址执行软下线
-	// 避免配置了某条链钱包却导致已有的其他链收款地址被误伤全量禁用
-	for chain, addrs := range chainAddrsMap {
-		if len(addrs) > 0 {
-			database.Model(&model.WalletAddress{}).
-				Where("chain = ? AND address NOT IN ?", chain, addrs).
-				Update("enabled", false)
-		}
 	}
 }

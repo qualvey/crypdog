@@ -446,6 +446,12 @@ func (h *IntentHandler) GetPaymentOptions(c *gin.Context) {
 		return
 	}
 
+	// 3. 从数据库查询启用的代币白名单 (支持按 priority 倒序排序)
+	var dbTokens []model.ChainToken
+	if err := h.db.Where("enabled = ?", true).Order("priority DESC, id ASC").Find(&dbTokens).Error; err != nil || len(dbTokens) == 0 {
+		dbTokens = model.GetDefaultChainTokens()
+	}
+
 	tokenMeta := map[string]model.CryptoTokenOption{
 		"USDT": {Symbol: "USDT", Name: "Tether USD", Icon: "fa-solid fa-circle-dollar-to-slot"},
 		"USDC": {Symbol: "USDC", Name: "USD Coin", Icon: "fa-solid fa-circle-dollar-to-slot"},
@@ -467,118 +473,56 @@ func (h *IntentHandler) GetPaymentOptions(c *gin.Context) {
 		model.ChainSolana:   {name: "Solana", badge: "极速"},
 	}
 
-	type chainDecimals struct {
-		chain    model.Chain
-		decimals int
-	}
-
-	// 各代币支持的链与精度矩阵
-	tokenChainMap := map[string][]chainDecimals{
-		"USDT": {
-			{chain: model.ChainTron, decimals: 6},
-			{chain: model.ChainArbitrum, decimals: 6},
-			{chain: model.ChainBsc, decimals: 18},
-			{chain: model.ChainEth, decimals: 6},
-			{chain: model.ChainPolygon, decimals: 6},
-			{chain: model.ChainSolana, decimals: 6},
-		},
-		"USDC": {
-			{chain: model.ChainArbitrum, decimals: 6},
-			{chain: model.ChainTron, decimals: 6},
-			{chain: model.ChainBsc, decimals: 18},
-			{chain: model.ChainEth, decimals: 6},
-			{chain: model.ChainPolygon, decimals: 6},
-			{chain: model.ChainSolana, decimals: 6},
-		},
-		"ETH": {
-			{chain: model.ChainArbitrum, decimals: 18},
-			{chain: model.ChainEth, decimals: 18},
-		},
-		"SOL": {
-			{chain: model.ChainSolana, decimals: 9},
-		},
-		"BNB": {
-			{chain: model.ChainBsc, decimals: 18},
-		},
-	}
-
-	tokenPriority := []string{"USDT", "USDC", "ETH", "SOL", "BNB"}
-	for _, sym := range tokenPriority {
-		chainsForToken, ok := tokenChainMap[sym]
-		if !ok {
+	seenTokens := make(map[string]bool)
+	for _, dt := range dbTokens {
+		normChain := string(model.NormalizeChain(string(dt.Chain)))
+		if !availableChains[normChain] {
 			continue
 		}
 
-		var matchedChains []model.CryptoChainOption
-		for _, cd := range chainsForToken {
-			norm := string(model.NormalizeChain(string(cd.chain)))
-			if availableChains[norm] {
-				name := string(cd.chain)
-				badge := ""
-				if meta, exists := chainMeta[cd.chain]; exists {
-					name = meta.name
-					badge = meta.badge
-				}
-				matchedChains = append(matchedChains, model.CryptoChainOption{
-					Chain:    cd.chain,
-					Name:     name,
-					Badge:    badge,
-					Decimals: cd.decimals,
-				})
-			}
-		}
-
-		if len(matchedChains) > 0 {
-			tokOpt, ok := tokenMeta[sym]
-			if !ok {
-				tokOpt = model.CryptoTokenOption{
-					Symbol: sym,
-					Name:   sym,
-					Icon:   "fa-solid fa-coins",
-				}
-			}
-			options.Tokens = append(options.Tokens, tokOpt)
-			options.Chains[sym] = matchedChains
-		}
-	}
-
-	// 容错兜底：如果有自定义公链在 availableChains 中但未被任何预定义代币收录，自动加入 USDT 列表
-	for chainStr := range availableChains {
-		alreadyIncluded := false
-		if usdtChains, exists := options.Chains["USDT"]; exists {
-			for _, cOpt := range usdtChains {
-				if string(model.NormalizeChain(string(cOpt.Chain))) == chainStr {
-					alreadyIncluded = true
-					break
-				}
-			}
-		}
-		if !alreadyIncluded {
-			cChain := model.NormalizeChain(chainStr)
-			cName := string(cChain)
-			cBadge := ""
-			if meta, exists := chainMeta[cChain]; exists {
+		sym := string(dt.Symbol)
+		cName := string(dt.Chain)
+		cBadge := dt.Badge
+		if meta, exists := chainMeta[dt.Chain]; exists {
+			if meta.name != "" {
 				cName = meta.name
+			}
+			if cBadge == "" {
 				cBadge = meta.badge
 			}
-			cOpt := model.CryptoChainOption{
-				Chain:    cChain,
-				Name:     cName,
-				Badge:    cBadge,
-				Decimals: 18,
-			}
-			options.Chains["USDT"] = append(options.Chains["USDT"], cOpt)
-			// 确保 Tokens 中包含 USDT
-			hasUSDT := false
-			for _, t := range options.Tokens {
-				if t.Symbol == "USDT" {
-					hasUSDT = true
-					break
+		}
+
+		cOpt := model.CryptoChainOption{
+			Chain:    dt.Chain,
+			Name:     cName,
+			Badge:    cBadge,
+			Decimals: dt.Decimals,
+		}
+
+		options.Chains[sym] = append(options.Chains[sym], cOpt)
+
+		if !seenTokens[sym] {
+			seenTokens[sym] = true
+			tName := dt.Name
+			tIcon := dt.Icon
+			if tIcon == "" {
+				if meta, ok := tokenMeta[sym]; ok {
+					tIcon = meta.Icon
+					if tName == "" {
+						tName = meta.Name
+					}
+				} else {
+					tIcon = "fa-solid fa-coins"
 				}
 			}
-			if !hasUSDT {
-				options.Tokens = append([]model.CryptoTokenOption{tokenMeta["USDT"]}, options.Tokens...)
+			if tName == "" {
+				tName = sym
 			}
+			options.Tokens = append(options.Tokens, model.CryptoTokenOption{
+				Symbol: sym,
+				Name:   tName,
+				Icon:   tIcon,
+			})
 		}
 	}
 

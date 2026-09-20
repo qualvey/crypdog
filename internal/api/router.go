@@ -149,6 +149,24 @@ func SetupRouter(h *Handler) *gin.Engine {
 		}
 	}
 
+	// Admin Control Plane Routes (收款钱包池与代币白名单管理)
+	adminHandler := NewAdminHandler(h.db, h.cfg)
+	admin := r.Group("/api/v1/admin")
+	admin.Use(authMiddleware)
+	{
+		// 收款地址池 CRUD
+		admin.GET("/wallets", adminHandler.ListWallets)
+		admin.POST("/wallets", adminHandler.CreateWallet)
+		admin.PUT("/wallets/:id", adminHandler.UpdateWallet)
+		admin.DELETE("/wallets/:id", adminHandler.DeleteWallet)
+
+		// 代币合约白名单 CRUD
+		admin.GET("/tokens", adminHandler.ListTokens)
+		admin.POST("/tokens", adminHandler.CreateToken)
+		admin.PUT("/tokens/:id", adminHandler.UpdateToken)
+		admin.DELETE("/tokens/:id", adminHandler.DeleteToken)
+	}
+
 	// Mock Webhook Receiver Endpoint 仅在本地开发调试（AllowLocal 为 true）时挂载
 	if h.cfg.Webhook.AllowLocal {
 		r.POST("/api/v1/mock/webhook", func(c *gin.Context) {
