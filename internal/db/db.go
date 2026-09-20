@@ -47,6 +47,7 @@ func InitDB(cfg *config.Config) *gorm.DB {
 		&model.PaymentIntent{},
 		&model.ChainTransfer{},
 		&model.WebhookLog{},
+		&model.AdminAuditLog{},
 		&model.WalletAddress{},
 		&model.ScanProgress{},
 		&model.ChainToken{},

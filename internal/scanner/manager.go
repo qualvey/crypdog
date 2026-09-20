@@ -60,9 +60,16 @@ func (m *Manager) Register(s Scanner) {
 func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) error {
 
 	for chain, nodeCfg := range cfg.Chains {
-		// 校验是否启用
-		if !isChainNodeEnabled(&nodeCfg) {
-			log.Printf("[Init] 跳过链扫描器: %s (已禁用或未配置 RPC)", chain)
+		// 显式禁用的链可以安全跳过；显式启用但配置不完整必须阻止启动。
+		if nodeCfg.Enabled != nil && !*nodeCfg.Enabled {
+			log.Printf("[Init] 跳过链扫描器: %s (已禁用)", chain)
+			continue
+		}
+		if strings.TrimSpace(nodeCfg.RPCURL) == "" {
+			if nodeCfg.Enabled != nil && *nodeCfg.Enabled {
+				return fmt.Errorf("链 %s 已启用但未配置 RPC URL", chain)
+			}
+			log.Printf("[Init] 跳过链扫描器: %s (未配置 RPC)", chain)
 			continue
 		}
 		// 根据 Driver 查找对应的构造器，未配置时自动根据链类型推断默认驱动
@@ -72,8 +79,7 @@ func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) error {
 		}
 		factory, exists := m.scannerDrivers[driver]
 		if !exists {
-			log.Printf("[Init] 跳过链扫描器: %s (不支持的驱动类型: %s)", chain, nodeCfg.Driver)
-			continue
+			return fmt.Errorf("链 %s 使用了不支持的驱动类型: %s", chain, driver)
 		}
 		scanner, err := factory(chain, db, nodeCfg)
 		if err != nil {
@@ -147,8 +153,8 @@ func (m *Manager) VerifyTransaction(ctx context.Context, chain model.Chain, txHa
 	s, ok := m.scanners[string(chain)]
 	m.mu.RUnlock()
 	if !ok {
-		// 未找到或未启用扫描器，若无对应扫描器则默认跳过二次核验
-		return true, nil
+		// 缺失扫描器时不能默认放行，否则会绕过交易二次核验。
+		return false, fmt.Errorf("链 %s 扫描器未注册，无法验证交易", chain)
 	}
 
 	if verifier, ok := s.(TxVerifier); ok {

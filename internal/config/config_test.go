@@ -59,7 +59,8 @@ func TestConfig_ValidateProduction(t *testing.T) {
 		cfg := Config{
 			Env: "production",
 			Server: ServerConfig{
-				Secret: "a-valid-production-service-secret-123",
+				Secret:      "a-valid-production-service-secret-123",
+				AdminSecret: "a-valid-production-admin-secret-987654321",
 			},
 			Webhook: WebhookConfig{
 				Secret:     "crypdog-webhook-secret-987654",
@@ -75,7 +76,8 @@ func TestConfig_ValidateProduction(t *testing.T) {
 		cfg := Config{
 			Env: "production",
 			Server: ServerConfig{
-				Secret: "a-valid-production-service-secret-123",
+				Secret:      "a-valid-production-service-secret-123",
+				AdminSecret: "a-valid-production-admin-secret-987654321",
 			},
 			Webhook: WebhookConfig{
 				Secret:     "a-valid-production-webhook-secret-987",
@@ -92,6 +94,7 @@ func TestConfig_ValidateProduction(t *testing.T) {
 			Env: "production",
 			Server: ServerConfig{
 				Secret:           "a-valid-production-service-secret-123",
+				AdminSecret:      "a-valid-production-admin-secret-987654321",
 				EnableSimulation: true,
 			},
 			Webhook: WebhookConfig{
@@ -109,11 +112,16 @@ func TestConfig_ValidateProduction(t *testing.T) {
 			Env: "production",
 			Server: ServerConfig{
 				Secret:           "my-strong-production-service-key-xyz-123",
+				AdminSecret:      "my-strong-production-admin-key-xyz-123",
 				EnableSimulation: false,
 			},
 			Webhook: WebhookConfig{
 				Secret:     "my-strong-production-webhook-key-abc-456",
 				AllowLocal: false,
+			},
+			Metrics: MetricsConfig{
+				Enabled: true,
+				Secret:  "my-strong-production-metrics-key-abc-456",
 			},
 		}
 		err := cfg.ValidateProduction()

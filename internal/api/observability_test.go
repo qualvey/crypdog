@@ -21,7 +21,7 @@ import (
 func setupTestRouter(t *testing.T) (*gorm.DB, http.Handler) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)
-	_ = db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{})
+	_ = db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{}, &model.AdminAuditLog{})
 
 	metrics.InitMetrics()
 
@@ -334,6 +334,3 @@ func TestRegisterIntent_RejectNonPlatformWallet(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "not in the configured platform wallet pool")
 }
-
-
-

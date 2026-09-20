@@ -22,6 +22,9 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | `env` | `APP_ENV` | `development` | 运行环境，可选 `development` 或 `production` |
 | `server.port` | `CRYPDOG_PORT` | `8080` | HTTP API 监听端口 |
 | `server.secret` | `CRYPDOG_SECRET` | `crypdog-secret-key-123456` | API 鉴权使用的 Bearer 服务秘钥 |
+| `server.admin_secret` | `CRYPDOG_ADMIN_SECRET` | - | 管理接口独立 Bearer 秘钥，生产环境必须配置 |
+| `server.allowed_origins` | `CRYPDOG_ALLOWED_ORIGINS` | 空 | 允许浏览器跨域访问的 Origin，多个值用逗号分隔 |
+| `server.rate_limit_per_minute` | `CRYPDOG_RATE_LIMIT_PER_MINUTE` | `300` | 单客户端每分钟请求上限，边缘代理仍应配置独立限流 |
 | `server.enable_simulation` | `CRYPDOG_ENABLE_SIMULATION` | `false` | 是否开启本地模拟充值流水接口 (`/intents/simulate`)，**生产环境必须为 false** |
 
 ---
@@ -56,6 +59,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | `log.file_path` | `LOG_FILE_PATH` | `""` | 当 output 为 file 时的磁盘写入路径 |
 | `metrics.enabled` | `METRICS_ENABLED` | `true` | 是否暴露 Prometheus 监控指标端点 |
 | `metrics.path` | `METRICS_PATH` | `/metrics` | 指标拉取路径 |
+| `metrics.secret` | `CRYPDOG_METRICS_SECRET` | 空 | 指标端点独立 Bearer 秘钥，生产环境启用 Metrics 时必须配置 |
 | `pprof.enabled` | `PPROF_ENABLED` | `false` | 是否开启 Go 运行时性能探针（`/debug/pprof`） |
 
 ---
@@ -90,7 +94,11 @@ chains:
 2. **SSRF 防御阻断**：
    - `webhook.allow_local` 必须为 `false`。严禁向局域网内部私网 IP 发起回调，防止内网探测渗透。
 3. **模拟入账阻断**：
-   - `server.enable_simulation` 必须为 `false`。严禁在生产开启无凭证的本地入账模拟接口。
+    - `server.enable_simulation` 必须为 `false`。严禁在生产开启无凭证的本地入账模拟接口。
+4. **权限隔离**：
+    - `server.admin_secret` 必须与业务 `server.secret` 不同。
+5. **指标保护**：
+    - 启用 Metrics 时必须配置独立的 `metrics.secret`。
 
 ---
 
@@ -100,8 +108,11 @@ chains:
 APP_ENV=production
 CRYPDOG_PORT=8080
 CRYPDOG_SECRET=3f98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
+CRYPDOG_ADMIN_SECRET=5a98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
 CRYPDOG_WEBHOOK_SECRET=8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b
 CRYPDOG_ENABLE_SIMULATION=false
+CRYPDOG_METRICS_SECRET=9c98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
+CRYPDOG_ALLOWED_ORIGINS=https://admin.example.com
 WEBHOOK_ALLOW_LOCAL=false
 
 DB_DRIVER=postgres

@@ -66,17 +66,6 @@ func TestManager_RegisterFromConfig(t *testing.T) {
 				Driver:  "evm",
 				RPCURL:  "https://mock-rpc",
 			},
-			model.ChainTron: {
-				Enabled: Ptr(true),
-				Driver:  "solana", // 验证未知驱动（solana 未注册）不会导致崩溃且安全跳过
-				RPCURL:  "https://mock-rpc",
-			},
-			// 4. 边界：RPC 为空 -> 应跳过
-			"EMPTY_RPC_CHAIN": {
-				Enabled: Ptr(true),
-				Driver:  "evm",
-				RPCURL:  "   ",
-			},
 		},
 	}
 
@@ -87,9 +76,27 @@ func TestManager_RegisterFromConfig(t *testing.T) {
 	// 3. Assert（断言分流结果）
 	assert.True(t, calledChains[model.ChainBsc], "正常启用的 EVM 链必须被注册")
 	assert.False(t, calledChains[model.ChainEth], "禁用的链绝不能被注册")
-	assert.False(t, calledChains[model.ChainTron], "未知驱动的链必须安全跳过")
-	assert.False(t, calledChains["EMPTY_RPC_CHAIN"], "RPC 为空的链必须跳过")
 	assert.Equal(t, 1, len(calledChains), "最终应该恰好只注册了 1 个扫描器")
+}
+
+func TestManager_RegisterFromConfig_RejectsInvalidEnabledChain(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.ChainNodeConfig
+		want string
+	}{
+		{name: "missing rpc", cfg: config.ChainNodeConfig{Enabled: Ptr(true), Driver: "evm"}, want: "未配置 RPC URL"},
+		{name: "unsupported driver", cfg: config.ChainNodeConfig{Enabled: Ptr(true), Driver: "unknown", RPCURL: "https://mock-rpc"}, want: "不支持的驱动类型"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := NewManager()
+			cfg := &config.Config{Chains: map[model.Chain]config.ChainNodeConfig{"TEST": tt.cfg}}
+			err := mgr.RegisterFromConfig(cfg, nil)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
 }
 
 func TestManager_RegisterFromConfig_InferDriver(t *testing.T) {
@@ -146,6 +153,13 @@ func TestManager_GetLatestBlockAndStatus(t *testing.T) {
 
 	status := mgr.GetScannersStatus()
 	assert.Equal(t, uint64(12345), status[string(model.ChainBsc)])
+}
+
+func TestManager_VerifyTransaction_RejectsMissingScanner(t *testing.T) {
+	mgr := NewManager()
+	valid, err := mgr.VerifyTransaction(context.Background(), model.ChainBsc, "0xhash", 1)
+	assert.Error(t, err)
+	assert.False(t, valid)
 }
 
 func TestManager_StartAll(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"strings"
+	"time"
 
 	"crypdog/internal/config"
 	"crypdog/internal/engine"
@@ -57,16 +58,29 @@ func SetupRouter(h *Handler) *gin.Engine {
 	r.Use(StructuredRecoveryMiddleware())
 	r.Use(RequestIDMiddleware())
 	r.Use(AccessLogMiddleware())
+	r.Use(RateLimitMiddleware(h.cfg.Server.RateLimitPerMin))
 
-	// CORS Middleware
+	// Limit request bodies before JSON binding to prevent memory exhaustion.
+	r.Use(func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		c.Next()
+	})
+
+	// CORS Middleware. Empty allow-list means no browser CORS access.
 	r.Use(func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
-		if origin != "" {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		allowed := false
+		for _, configured := range h.cfg.Server.AllowedOrigins {
+			if strings.TrimSpace(configured) == origin {
+				allowed = true
+				break
+			}
 		}
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		if allowed {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Set("Vary", "Origin")
+			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
@@ -91,7 +105,20 @@ func SetupRouter(h *Handler) *gin.Engine {
 		if metricsPath == "" {
 			metricsPath = "/metrics"
 		}
-		r.GET(metricsPath, gin.WrapH(promhttp.Handler()))
+		metricsHandler := gin.WrapH(promhttp.Handler())
+		if h.cfg.Metrics.Secret != "" {
+			r.GET(metricsPath, func(c *gin.Context) {
+				expected := "Bearer " + h.cfg.Metrics.Secret
+				provided := c.GetHeader("Authorization")
+				if len(provided) != len(expected) || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+					c.AbortWithStatus(http.StatusUnauthorized)
+					return
+				}
+				metricsHandler(c)
+			})
+		} else {
+			r.GET(metricsPath, metricsHandler)
+		}
 	}
 
 	// Service Authorization Middleware (使用常量时间比对防时序侧信道反推)
@@ -107,6 +134,36 @@ func SetupRouter(h *Handler) *gin.Engine {
 			return
 		}
 		c.Next()
+	}
+	adminAuthMiddleware := func(c *gin.Context) {
+		secret := h.cfg.Server.AdminSecret
+		if secret == "" {
+			secret = h.cfg.Server.Secret // development/test compatibility
+		}
+		expectedToken := "Bearer " + secret
+		provided := c.GetHeader("Authorization")
+		if len(provided) != len(expectedToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "Unauthorized admin access"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+	adminAuditMiddleware := func(c *gin.Context) {
+		c.Next()
+		if h.db == nil {
+			return
+		}
+		requestID := c.Writer.Header().Get(HeaderXRequestID)
+		_ = h.db.Create(&model.AdminAuditLog{
+			RequestID:  requestID,
+			Method:     c.Request.Method,
+			Path:       c.Request.URL.Path,
+			ClientIP:   c.ClientIP(),
+			StatusCode: c.Writer.Status(),
+			Success:    c.Writer.Status() >= 200 && c.Writer.Status() < 400,
+			CreatedAt:  time.Now(),
+		}).Error
 	}
 
 	// pprof Profiling 调试探针（必须增加鉴权保护）
@@ -152,7 +209,7 @@ func SetupRouter(h *Handler) *gin.Engine {
 	// Admin Control Plane Routes (收款钱包池与代币白名单管理)
 	adminHandler := NewAdminHandler(h.db, h.cfg)
 	admin := r.Group("/api/v1/admin")
-	admin.Use(authMiddleware)
+	admin.Use(adminAuthMiddleware, adminAuditMiddleware)
 	{
 		// 收款地址池 CRUD
 		admin.GET("/wallets", adminHandler.ListWallets)
@@ -170,35 +227,35 @@ func SetupRouter(h *Handler) *gin.Engine {
 	// Mock Webhook Receiver Endpoint 仅在本地开发调试（AllowLocal 为 true）时挂载
 	if h.cfg.Webhook.AllowLocal {
 		r.POST("/api/v1/mock/webhook", func(c *gin.Context) {
-		sig := c.GetHeader("X-Signature-SHA256")
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot read body"})
-			return
-		}
+			sig := c.GetHeader("X-Signature-SHA256")
+			bodyBytes, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot read body"})
+				return
+			}
 
-		// Verify HMAC signature
-		isValid := signature.VerifyHMACSHA256(bodyBytes, h.cfg.Webhook.Secret, sig)
-		log.Printf("==================================================")
-		log.Printf("[Mock Webhook Target] Received Webhook Payload!")
-		log.Printf("Header X-Signature-SHA256: %s", sig)
-		log.Printf("Payload Body: %s", string(bodyBytes))
-		log.Printf("HMAC Verification Result: %v (Valid: %t)", sig, isValid)
-		log.Printf("==================================================")
+			// Verify HMAC signature
+			isValid := signature.VerifyHMACSHA256(bodyBytes, h.cfg.Webhook.Secret, sig)
+			log.Printf("==================================================")
+			log.Printf("[Mock Webhook Target] Received Webhook Payload!")
+			log.Printf("Header X-Signature-SHA256: %s", sig)
+			log.Printf("Payload Body: %s", string(bodyBytes))
+			log.Printf("HMAC Verification Result: %v (Valid: %t)", sig, isValid)
+			log.Printf("==================================================")
 
-		if !isValid {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Invalid HMAC-SHA256 signature",
+			if !isValid {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "Invalid HMAC-SHA256 signature",
+				})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"code":    200,
+				"message": "Webhook received and signature verified successfully",
 			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "Webhook received and signature verified successfully",
 		})
-	})
 	}
 
 	return r

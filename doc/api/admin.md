@@ -7,9 +7,9 @@
 ## 1. 通用鉴权
 
 - **基础路径**：`/api/v1/admin`
-- **认证方式**：HTTP Bearer Token（使用 `server.secret`）：
+- **认证方式**：HTTP Bearer Token（使用独立的 `server.admin_secret`）：
   ```http
-  Authorization: Bearer <service_secret>
+  Authorization: Bearer <admin_secret>
   ```
   若缺少或秘钥不符，系统返回 `401 Unauthorized`。
 

@@ -58,9 +58,12 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Port             string `yaml:"port" env:"CRYPDOG_PORT" env-default:"8080"`
-	Secret           string `yaml:"secret" env:"CRYPDOG_SECRET" env-default:"crypdog-secret-key-123456"`
-	EnableSimulation bool   `yaml:"enable_simulation" env:"CRYPDOG_ENABLE_SIMULATION" env-default:"false"`
+	Port             string   `yaml:"port" env:"CRYPDOG_PORT" env-default:"8080"`
+	Secret           string   `yaml:"secret" env:"CRYPDOG_SECRET" env-default:"crypdog-secret-key-123456"`
+	AdminSecret      string   `yaml:"admin_secret" env:"CRYPDOG_ADMIN_SECRET"`
+	AllowedOrigins   []string `yaml:"allowed_origins" env:"CRYPDOG_ALLOWED_ORIGINS"`
+	RateLimitPerMin  int      `yaml:"rate_limit_per_minute" env:"CRYPDOG_RATE_LIMIT_PER_MINUTE" env-default:"300"`
+	EnableSimulation bool     `yaml:"enable_simulation" env:"CRYPDOG_ENABLE_SIMULATION" env-default:"false"`
 }
 type WebhookConfig struct {
 	Secret     string `yaml:"webhook_secret" env:"CRYPDOG_WEBHOOK_SECRET" env-default:"crypdog-webhook-secret-987654"`
@@ -84,6 +87,7 @@ type LogConfig struct {
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled" env:"METRICS_ENABLED" env-default:"true"`
 	Path    string `yaml:"path" env:"METRICS_PATH" env-default:"/metrics"`
+	Secret  string `yaml:"secret" env:"CRYPDOG_METRICS_SECRET"`
 }
 
 // PprofConfig 性能探针配置
@@ -97,6 +101,9 @@ func (c *Config) ValidateProduction() error {
 		if c.Server.Secret == "crypdog-secret-key-123456" || len(c.Server.Secret) < 16 {
 			return fmt.Errorf("生产环境安全阻断: service_secret 不能使用默认弱口令，且长度须 >= 16 字符")
 		}
+		if c.Server.AdminSecret == "" || len(c.Server.AdminSecret) < 16 || c.Server.AdminSecret == c.Server.Secret {
+			return fmt.Errorf("生产环境安全阻断: admin_secret 必须配置长度 >= 16 且不能复用 service_secret")
+		}
 		if c.Webhook.Secret == "crypdog-webhook-secret-987654" || len(c.Webhook.Secret) < 16 {
 			return fmt.Errorf("生产环境安全阻断: webhook_secret 不能使用默认弱口令，且长度须 >= 16 字符")
 		}
@@ -105,6 +112,9 @@ func (c *Config) ValidateProduction() error {
 		}
 		if c.Server.EnableSimulation {
 			return fmt.Errorf("生产环境安全阻断: server.enable_simulation 必须为 false，严禁生产环境开启模拟入账接口")
+		}
+		if c.Metrics.Enabled && (c.Metrics.Secret == "" || len(c.Metrics.Secret) < 16) {
+			return fmt.Errorf("生产环境安全阻断: metrics.secret 必须配置且长度须 >= 16 字符")
 		}
 	}
 	return nil

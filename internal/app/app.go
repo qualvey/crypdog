@@ -66,7 +66,9 @@ func (a *App) Run() error {
 		return scanner.NewSolanaScanner(db, &chainCfg)
 	})
 
-	a.scannerMgr.RegisterFromConfig(a.cfg, a.db) // 关键：注册逻辑内聚到 scanner
+	if err := a.scannerMgr.RegisterFromConfig(a.cfg, a.db); err != nil {
+		return fmt.Errorf("加载链扫描器配置失败: %w", err)
+	}
 	// 4. 撮合引擎（注入链上收据二次核验，拦截假充值）
 	a.matcher = engine.NewMatcherEngine(a.db, a.cfg, a.dispatcher, a.scannerMgr.VerifyTransaction)
 	go a.runPipeline(ctx)
@@ -187,8 +189,13 @@ func (a *App) startHTTP() error {
 	ginHandler := api.SetupRouter(handler)
 
 	a.srv = &http.Server{
-		Addr:    fmt.Sprintf(":%s", a.cfg.Server.Port),
-		Handler: ginHandler,
+		Addr:              fmt.Sprintf(":%s", a.cfg.Server.Port),
+		Handler:           ginHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {

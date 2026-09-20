@@ -47,6 +47,13 @@ type WebhookDispatcher struct {
 	client *http.Client
 }
 
+func (w *WebhookDispatcher) maxAttempts() int {
+	if w.cfg == nil || w.cfg.Webhook.MaxRetries <= 0 {
+		return 4 // one initial attempt plus the default three retries
+	}
+	return 1 + w.cfg.Webhook.MaxRetries
+}
+
 func NewWebhookDispatcher(db *gorm.DB, cfg *config.Config) *WebhookDispatcher {
 	timeout := 10 * time.Second
 	if cfg != nil && cfg.Webhook.TimeoutSec > 0 {
@@ -140,7 +147,7 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 	since := now.Add(-2 * time.Hour)
 	err := w.db.WithContext(ctx).
 		Where("success = ? AND attempt < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ? AND created_at >= ?",
-			false, 5, now, since).
+			false, w.maxAttempts(), now, since).
 		Order("id ASC").
 		Limit(20).
 		Find(&pendingLogs).Error
@@ -261,7 +268,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	webhookLog.Success = success
 
 	var nextDelay time.Duration
-	if !success && attempt < 5 {
+	if !success && attempt < w.maxAttempts() {
 		backoffDurations := []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute}
 		nextDelay = backoffDurations[attempt-1]
 		nextRetryAt := time.Now().Add(nextDelay)
@@ -279,7 +286,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	log.Printf("[Webhook] Delivery failed for Order: %s (Status: %d, Attempt: %d)", orderID, webhookLog.StatusCode, attempt)
 
 	// 重试彻底收拢至 StartRetryWorker 单一持久化队列驱动，严禁在此启动 time.AfterFunc 导致双重触发
-	if attempt < 5 {
+	if attempt < w.maxAttempts() {
 		metrics.RecordWebhookDispatch("retry", durationSec)
 		log.Printf("[Webhook] 订单 %s 投递失败，下一次重试将在 %v 后由持久化 Worker 统一驱动 (Attempt: %d)",
 			orderID, nextDelay, attempt+1)

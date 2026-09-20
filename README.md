@@ -194,29 +194,20 @@ CrypDog 采用**双段 Webhook 机制**向主业务服务器的 `webhookUrl` 发
 ## ⚙️ 环境变量配置 (`.env`)
 
 ```env
-SERVER_PORT=8080
-SERVICE_SECRET_KEY=crypdog-secret-key-123456
-SHARED_WEBHOOK_SECRET=crypdog-webhook-secret-987654
+APP_ENV=development
+CRYPDOG_PORT=8080
+CRYPDOG_SECRET=replace-with-a-random-secret-at-least-16-characters
+CRYPDOG_ADMIN_SECRET=replace-with-a-different-admin-secret-at-least-16-characters
+CRYPDOG_WEBHOOK_SECRET=replace-with-a-different-random-secret-at-least-16-characters
+CRYPDOG_ENABLE_SIMULATION=false
+CRYPDOG_METRICS_SECRET=replace-with-a-metrics-secret-at-least-16-characters
+CRYPDOG_ALLOWED_ORIGINS=https://admin.example.com
 
 # 数据库配置: sqlite 或 postgres
 DB_DRIVER=sqlite
 DB_DSN=crypdog.db
 
-# 扫描周期 (秒)
-SCAN_INTERVAL_SEC=5
-
-# TRON 节点与 API Key
-TRON_NODE_URL=https://api.trongrid.io
-TRONGRID_API_KEY=
-
-# EVM 各链公共/私有 RPC URL
-ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
-BSC_RPC_URL=https://binance.llamarpc.com
-
-# 各链安全确认数阈值
-TRON_CONFIRMATIONS=19
-BSC_CONFIRMATIONS=15
-ARBITRUM_CONFIRMATIONS=3
+# 区块链节点、钱包和确认数请在 config.yaml 的 chains / initial_wallets 中配置
 ```
 
 ---

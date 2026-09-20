@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"crypdog/internal/logger"
@@ -12,6 +13,41 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+type rateLimitEntry struct {
+	started time.Time
+	count   int
+}
+
+// RateLimitMiddleware provides a conservative per-client fixed-window limit.
+// Production deployments should still enforce limits at the edge proxy.
+func RateLimitMiddleware(limit int) gin.HandlerFunc {
+	if limit <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	var mu sync.Mutex
+	entries := make(map[string]rateLimitEntry)
+	return func(c *gin.Context) {
+		key := c.ClientIP()
+		now := time.Now()
+		mu.Lock()
+		entry := entries[key]
+		if entry.started.IsZero() || now.Sub(entry.started) >= time.Minute {
+			entry = rateLimitEntry{started: now}
+		}
+		entry.count++
+		entries[key] = entry
+		allowed := entry.count <= limit
+		mu.Unlock()
+
+		if !allowed {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 429, "message": "rate limit exceeded"})
+			return
+		}
+		c.Next()
+	}
+}
 
 const HeaderXRequestID = "X-Request-ID"
 

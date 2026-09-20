@@ -22,14 +22,15 @@ import (
 func setupAdminTestRouter(t *testing.T) (*gorm.DB, http.Handler) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	assert.NoError(t, err)
-	assert.NoError(t, db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{}))
+	assert.NoError(t, db.AutoMigrate(&model.WalletAddress{}, &model.PaymentIntent{}, &model.ChainToken{}, &model.AdminAuditLog{}))
 
 	metrics.InitMetrics()
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			Port:   "8080",
-			Secret: "admin-test-secret-123456",
+			Port:        "8080",
+			Secret:      "service-test-secret-123456",
+			AdminSecret: "admin-test-secret-123456",
 		},
 	}
 
@@ -49,6 +50,15 @@ func TestAdminAuth_Unauthorized(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestAdminAuth_UsesSeparateSecret(t *testing.T) {
+	_, r := setupAdminTestRouter(t)
+	req := httptest.NewRequest("GET", "/api/v1/admin/wallets", nil)
+	req.Header.Set("Authorization", "Bearer service-test-secret-123456")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 

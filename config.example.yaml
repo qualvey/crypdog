@@ -3,6 +3,9 @@ env: "development" # "development" 或 "production" (生产环境将强制启用
 server:
   port: "8080"
   secret: "crypdog-secret-key-123456"
+  admin_secret: "crypdog-admin-secret-123456"
+  allowed_origins: [] # 例如 ["https://admin.example.com"]
+  rate_limit_per_minute: 300
   enable_simulation: false # 模拟入账测试接口总开关，生产环境必须且强制为 false
 
 webhook:
@@ -24,6 +27,7 @@ log:
 metrics:
   enabled: true
   path: "/metrics"
+  secret: "" # 生产环境必须配置独立指标密钥
 
 pprof:
   enabled: false

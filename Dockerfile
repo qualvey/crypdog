@@ -19,8 +19,8 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /root/
 
 COPY --from=builder /app/crypdog .
-COPY --from=builder /app/.env.example .env
-COPY --from=builder /app/config.yaml config.yaml
+# Production configuration and secrets must be supplied at runtime. Do not bake
+# credentials or a local development config into the image.
 
 EXPOSE 8080
 

@@ -79,6 +79,23 @@ type WebhookLog struct {
 	NextRetryAt  *time.Time `json:"nextRetryAt,omitempty"`
 	CreatedAt    time.Time  `json:"createdAt"`
 }
+
+// AdminAuditLog records privileged control-plane operations.
+type AdminAuditLog struct {
+	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	RequestID  string    `gorm:"size:64;index" json:"requestId"`
+	Method     string    `gorm:"size:16;not null" json:"method"`
+	Path       string    `gorm:"size:256;not null" json:"path"`
+	ClientIP   string    `gorm:"size:64" json:"clientIp"`
+	StatusCode int       `json:"statusCode"`
+	Success    bool      `gorm:"index" json:"success"`
+	CreatedAt  time.Time `gorm:"index" json:"createdAt"`
+}
+
+func (AdminAuditLog) TableName() string {
+	return "admin_audit_logs"
+}
+
 type StrategyFactory struct{}
 
 type Chain string
@@ -109,8 +126,8 @@ type WalletAddress struct {
 
 	// 资产属性
 	Chain   Chain  `gorm:"size:32;not null;index:idx_chain_enabled;uniqueIndex:idx_chain_address,priority:1" json:"chain"` // 如: "TRON", "ETH", "BSC"
-	Address string `gorm:"size:128;not null;uniqueIndex:idx_chain_address,priority:2" json:"address"`                     // 链上实际收款地址
-	Label   string `gorm:"size:64" json:"label,omitempty"`                                                               // 备注/冷钱包标签 (如 "Binance Hot 01")
+	Address string `gorm:"size:128;not null;uniqueIndex:idx_chain_address,priority:2" json:"address"`                      // 链上实际收款地址
+	Label   string `gorm:"size:64" json:"label,omitempty"`                                                                 // 备注/冷钱包标签 (如 "Binance Hot 01")
 
 	// 状态控制
 	Enabled bool `gorm:"not null;default:true;index:idx_chain_enabled" json:"enabled"` // 是否启用接收新付款
@@ -165,4 +182,3 @@ func NewChainTransfer(
 		BlockNumber:   blockNumber,
 	}
 }
-

@@ -6,33 +6,38 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    volumes:
+      - ./config.yaml:/root/config.yaml:ro
     environment:
-      - SERVER_PORT=8080
-      - SERVICE_SECRET_KEY=crypdog-secret-key-123456
-      - SHARED_WEBHOOK_SECRET=crypdog-webhook-secret-987654
-      - DB_DRIVER=postgres
-      - DB_DSN=host=postgres user=postgres password=postgres dbname=crypdog port=5432 sslmode=disable
+      APP_ENV: production
+      CRYPDOG_PORT: "8080"
+      CRYPDOG_SECRET: ${CRYPDOG_SECRET:?set CRYPDOG_SECRET to a strong secret}
+      CRYPDOG_ADMIN_SECRET: ${CRYPDOG_ADMIN_SECRET:?set CRYPDOG_ADMIN_SECRET to a strong admin secret}
+      CRYPDOG_WEBHOOK_SECRET: ${CRYPDOG_WEBHOOK_SECRET:?set CRYPDOG_WEBHOOK_SECRET to a strong secret}
+      CRYPDOG_ENABLE_SIMULATION: "false"
+      CRYPDOG_METRICS_SECRET: ${CRYPDOG_METRICS_SECRET:?set CRYPDOG_METRICS_SECRET to a strong metrics secret}
+      CRYPDOG_ALLOWED_ORIGINS: ${CRYPDOG_ALLOWED_ORIGINS:-}
+      WEBHOOK_ALLOW_LOCAL: "false"
+      DB_DRIVER: postgres
+      DB_DSN: host=postgres user=${POSTGRES_USER:-crypdog} password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD to a strong password} dbname=${POSTGRES_DB:-crypdog} port=5432 sslmode=disable
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
     restart: always
 
   postgres:
     image: postgres:15-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: crypdog
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-crypdog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD to a strong password}
+      POSTGRES_DB: ${POSTGRES_DB:-crypdog}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    restart: always
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: always
 
 volumes:
