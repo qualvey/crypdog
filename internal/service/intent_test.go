@@ -399,4 +399,3 @@ func TestCancelIntent_Restrictions(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, model.StatusCancelled, cancelled.Status)
 }
-

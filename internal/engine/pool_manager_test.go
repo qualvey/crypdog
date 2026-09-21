@@ -216,4 +216,3 @@ func TestMicroAmountManager_CooldownProtection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "10.0003", nextAllocated.StringFixed(4))
 }
-

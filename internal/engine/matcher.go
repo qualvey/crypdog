@@ -278,4 +278,3 @@ func (e *MatcherEngine) queryExpiredCandidateIntents(transfer model.ChainTransfe
 	).Find(&intents).Error
 	return intents, err
 }
-

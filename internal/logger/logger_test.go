@@ -113,4 +113,3 @@ func TestConcurrentSetLevel(t *testing.T) {
 	}
 	wg.Wait()
 }
-

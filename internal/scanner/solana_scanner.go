@@ -81,6 +81,7 @@ func NewSolanaScanner(db *gorm.DB, cfg *config.ChainNodeConfig) (Scanner, error)
 	}
 	return scanner, nil
 }
+
 // SupportedTokens implements [Scanner].
 func (s *SolanaScanner) SupportedTokens() []model.TokenSpec {
 	s.tokensMu.RLock()
@@ -513,7 +514,6 @@ type rpcErr struct {
 	Message string `json:"message"`
 }
 
-
 type solTx struct {
 	Transaction struct {
 		Signatures []string `json:"signatures"`
@@ -545,6 +545,7 @@ type solSig struct {
 	Slot      int64       `json:"slot"`
 	Err       interface{} `json:"err"` // null if successful
 }
+
 func (s *SolanaScanner) callRPC(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
 	reqBody := rpcReq{
 		JSONRPC: "2.0",

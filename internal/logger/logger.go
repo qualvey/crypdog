@@ -73,8 +73,8 @@ func ParseLevel(s string) Level {
 }
 
 var (
-	defaultWriter io.Writer      = os.Stderr
-	std                          = log.New(defaultWriter, "", log.LstdFlags)
+	defaultWriter io.Writer = os.Stderr
+	std                     = log.New(defaultWriter, "", log.LstdFlags)
 	mu            sync.RWMutex
 	currentLevel  Level          = LevelInfo
 	currentFormat string         = "text"

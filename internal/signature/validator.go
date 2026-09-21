@@ -12,10 +12,10 @@ import (
 )
 
 var (
-	ErrInvalidWebhookURL   = errors.New("invalid webhook url")
-	ErrDisallowedScheme    = errors.New("webhook url scheme must be http or https")
-	ErrSSRFProtection      = errors.New("webhook url targets restricted or private infrastructure")
-	ErrInvalidAddress      = errors.New("invalid wallet address format")
+	ErrInvalidWebhookURL = errors.New("invalid webhook url")
+	ErrDisallowedScheme  = errors.New("webhook url scheme must be http or https")
+	ErrSSRFProtection    = errors.New("webhook url targets restricted or private infrastructure")
+	ErrInvalidAddress    = errors.New("invalid wallet address format")
 )
 
 // ValidateWebhookURL 校验 Webhook URL 的合法性与 SSRF 安全防御
@@ -180,4 +180,3 @@ func ValidateChainAddress(chain string, rawAddr string) error {
 		return nil
 	}
 }
-

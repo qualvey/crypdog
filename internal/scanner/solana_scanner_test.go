@@ -258,7 +258,7 @@ func TestSolanaScanner_ExtractIncomingTransfers(t *testing.T) {
 				AccountIndex: 1,
 				Mint:         usdtMint,
 				// 仅将 targetAddr 变更为小写（在 Base58 中属于不同地址）
-				Owner:        strings.ToLower(targetAddr),
+				Owner: strings.ToLower(targetAddr),
 				UiTokenAmount: struct {
 					Amount         string `json:"amount"`
 					Decimals       int    `json:"decimals"`

@@ -76,4 +76,3 @@ func TestNormalizeChain(t *testing.T) {
 	assert.Equal(t, ChainPolygon, NormalizeChain("POLYGON"))
 	assert.Equal(t, ChainArbitrum, NormalizeChain("ARBITRUM"))
 }
-

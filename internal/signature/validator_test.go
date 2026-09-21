@@ -52,7 +52,7 @@ func TestValidateChainAddress(t *testing.T) {
 	// TRON: invalid
 	assert.Error(t, ValidateChainAddress("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6x")) // bad checksum
 	assert.Error(t, ValidateChainAddress("TRON", "AR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")) // not starting with T
-	assert.Error(t, ValidateChainAddress("TRON", "TR7NHqjeKQxGTCi8"))                    // short
+	assert.Error(t, ValidateChainAddress("TRON", "TR7NHqjeKQxGTCi8"))                   // short
 
 	// SOLANA: valid
 	assert.NoError(t, ValidateChainAddress("SOLANA", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"))
@@ -61,4 +61,3 @@ func TestValidateChainAddress(t *testing.T) {
 	assert.Error(t, ValidateChainAddress("SOLANA", "short"))
 	assert.Error(t, ValidateChainAddress("SOLANA", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNY0000000000000000000000000000")) // too long
 }
-

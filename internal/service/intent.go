@@ -19,9 +19,9 @@ import (
 )
 
 var (
-	ErrOrderAlreadyPaid = errors.New("order has already been paid")
-	ErrAmountCollision  = errors.New("amount collision detected on target address")
-	ErrParamMutation    = errors.New("active order cannot mutate parameters")
+	ErrOrderAlreadyPaid       = errors.New("order has already been paid")
+	ErrAmountCollision        = errors.New("amount collision detected on target address")
+	ErrParamMutation          = errors.New("active order cannot mutate parameters")
 	ErrIntentNotFound         = errors.New("payment intent not found")
 	ErrCannotCancelPaid       = errors.New("cannot cancel payment intent because it is already paid")
 	ErrCannotCancelConfirming = errors.New("cannot cancel payment intent because it is currently confirming on-chain")
@@ -315,4 +315,3 @@ func (s *IntentService) CancelIntent(idOrOrderID string) (*model.PaymentIntent, 
 	logger.Info("[IntentService] 成功取消支付意向: OrderID=%s, IntentID=%s", intent.OrderID, intent.ID)
 	return &intent, nil
 }
-

@@ -1,9 +1,9 @@
 package queue
 
 import (
+	"context"
 	"log"
 	"time"
-	"context"
 
 	"crypdog/internal/model"
 
@@ -20,7 +20,7 @@ func NewIntentCleaner(db *gorm.DB) *IntentCleaner {
 
 // StartCleaner runs a ticker that periodic checks for expired payment intents
 func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval) 
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -32,6 +32,7 @@ func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration
 		}
 	}
 }
+
 // safeCleanExpiredIntents 捕获单次清理异常，防止 Goroutine 退出
 func (c *IntentCleaner) safeCleanExpiredIntents() {
 	defer func() {

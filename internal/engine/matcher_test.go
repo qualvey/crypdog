@@ -622,5 +622,3 @@ func TestMatcherEngine_DualPhaseHook_FirstMatchGet_ThenConfirm(t *testing.T) {
 	assert.Equal(t, queue.WebhookEventConfirm, events2[2].Event)
 	assert.Equal(t, "ord_dual_002", events2[2].OrderID)
 }
-
-
