@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,6 +131,9 @@ func TestConfig_ValidateProduction(t *testing.T) {
 }
 func TestConfig_LoadFiles(t *testing.T) {
 	t.Run("load config.yaml", func(t *testing.T) {
+		if _, err := os.Stat("../../config.yaml"); os.IsNotExist(err) {
+			t.Skip("config.yaml is a local, git-ignored deployment file")
+		}
 		cfg, err := LoadConfig("../../config.yaml")
 		assert.NoError(t, err)
 		assert.NotNil(t, cfg)
