@@ -1,6 +1,7 @@
 
 services:
   crypdog:
+    image: ${CRYPDOG_IMAGE:-crypdog:local}
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+*.db
+*.db-*
+*.exe
+crypdog
+server
+.env
+config.yaml
+demo
+dist
+**/*_test.go
+doc
+plan.md
+journal.md
+test.md
