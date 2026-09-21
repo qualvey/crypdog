@@ -150,7 +150,7 @@ jobs:
             docker compose pull crypdog
             docker compose up -d --no-build crypdog
             docker compose ps
-            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8080/healthz/live; then
+            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8081/healthz/live; then
               echo '=== crypdog container status ==='
               docker compose ps -a
               echo '=== crypdog startup logs ==='
