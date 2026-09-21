@@ -84,6 +84,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare deployment directory
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            # The deploy user must be able to write the directory because
+            # scp-action uploads and extracts the archive as that user.
+            if [ -d "$DEPLOY_PATH" ] && [ ! -w "$DEPLOY_PATH" ]; then
+              sudo -n install -d -o "$(id -un)" -g "$(id -gn)" "$DEPLOY_PATH"
+            else
+              mkdir -p "$DEPLOY_PATH"
+            fi
+            if [ -e "$DEPLOY_PATH/docker-compose.yml" ] && [ ! -w "$DEPLOY_PATH/docker-compose.yml" ]; then
+              sudo -n chown "$(id -un):$(id -gn)" "$DEPLOY_PATH/docker-compose.yml"
+            fi
+            test -w "$DEPLOY_PATH"
+
       - name: Copy Compose file
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -109,11 +133,27 @@ jobs:
           script: |
             set -euo pipefail
             cd "$DEPLOY_PATH"
+            test -s .env
+            chmod 600 .env
+            grep -q '^CRYPDOG_SECRET=' .env
+            grep -q '^CRYPDOG_ADMIN_SECRET=' .env
+            grep -q '^CRYPDOG_WEBHOOK_SECRET=' .env
+            grep -q '^CRYPDOG_METRICS_SECRET=' .env
+            grep -q '^POSTGRES_PASSWORD=' .env
             if [ -n "${GHCR_TOKEN:-}" ]; then
               printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             fi
             export CRYPDOG_IMAGE="$IMAGE"
+            # Remove containers from this Compose project before recreating
+            # them. This releases the published 8080 port from old revisions.
+            docker compose down --remove-orphans
             docker compose pull crypdog
             docker compose up -d --no-build crypdog
             docker compose ps
-            curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8080/healthz/live
+            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8080/healthz/live; then
+              echo '=== crypdog container status ==='
+              docker compose ps -a
+              echo '=== crypdog startup logs ==='
+              docker compose logs --no-color --tail=200 crypdog
+              exit 1
+            fi

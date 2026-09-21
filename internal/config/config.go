@@ -134,6 +134,12 @@ func LoadConfig(configPath ...string) (*Config, error) {
 		if err := cleanenv.ReadConfig(targetPath, &cfg); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败 (%s): %w", targetPath, err)
 		}
+		// ReadConfig loads the YAML file, but deployment secrets and runtime
+		// overrides must come from the environment. Apply env values explicitly
+		// after the file so a mounted development config cannot override them.
+		if err := cleanenv.ReadEnv(&cfg); err != nil {
+			return nil, fmt.Errorf("读取环境变量覆盖配置失败: %w", err)
+		}
 	} else {
 		// 2. 如果无配置文件（如 Pure Docker 容器环境），直接纯读取环境变量
 		if err := cleanenv.ReadEnv(&cfg); err != nil {
