@@ -1,0 +1,60 @@
+site_name: CrypDog Documentation
+site_description: Crypto payment watchdog deployment and operations guide
+site_url: https://docs.example.com/crypdog
+docs_dir: doc
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-night
+        name: 切换到浅色模式
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+nav:
+  - 首页: README.md
+  - 配置:
+      - 配置参考: configuration/configuration.md
+  - 部署:
+      - 生产部署: deployment/production.md
+      - 上线检查清单: deployment/checklist.md
+  - 运维:
+      - 数据库: operations/database.md
+      - 监控与日志: operations/monitoring.md
+      - 故障排查: operations/troubleshooting.md
+  - 安全:
+      - 安全加固: security/hardening.md
+  - API:
+      - API 概览: api/README.md
+      - Watcher API: api/watcher.md
+      - Admin API: api/admin.md
+      - Web3 流程: web3.md
+      - 系统流程: flow.md
+      - Mermaid 示例: mermaid_test.md
+
+plugins:
+  - search

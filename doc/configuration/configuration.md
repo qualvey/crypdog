@@ -6,7 +6,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 
 ## 1. 配置文件加载机制
 
-配置加载由 [`internal/config/config.go`](file:///c:/Users/Ryu/Documents/workspace/crypdog/internal/config/config.go) 中的 `LoadConfig()` 执行，优先级规则如下：
+配置加载由 `internal/config/config.go` 中的 `LoadConfig()` 执行，优先级规则如下：
 1. **默认配置文件**：读取当前工作目录下的 `config.yaml`。
 2. **环境变量覆盖**：如果存在同名环境变量（如 Docker / Kubernetes 容器编排场景），将自动覆盖 YAML 中的默认值。
 3. **安全准入校验**：当 `env: "production"` 时，系统将启动 `ValidateProduction()` 强制进行安全合规审查。
@@ -21,7 +21,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | :--- | :--- | :--- | :--- |
 | `env` | `APP_ENV` | `development` | 运行环境，可选 `development` 或 `production` |
 | `server.port` | `CRYPDOG_PORT` | `8080` | HTTP API 监听端口 |
-| `server.secret` | `CRYPDOG_SECRET` | `crypdog-secret-key-123456` | API 鉴权使用的 Bearer 服务秘钥 |
+| `server.secret` | `CRYPDOG_SECRET` | 开发默认值 | API 鉴权使用的 Bearer 服务秘钥；生产必须使用随机值 |
 | `server.admin_secret` | `CRYPDOG_ADMIN_SECRET` | - | 管理接口独立 Bearer 秘钥，生产环境必须配置 |
 | `server.allowed_origins` | `CRYPDOG_ALLOWED_ORIGINS` | 空 | 允许浏览器跨域访问的 Origin，多个值用逗号分隔 |
 | `server.rate_limit_per_minute` | `CRYPDOG_RATE_LIMIT_PER_MINUTE` | `300` | 单客户端每分钟请求上限，边缘代理仍应配置独立限流 |
@@ -33,7 +33,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 
 | YAML 路径 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `webhook.webhook_secret` | `CRYPDOG_WEBHOOK_SECRET` | `crypdog-webhook-secret-987654` | Webhook 签名使用的 HMAC-SHA256 共享秘钥 |
+| `webhook.webhook_secret` | `CRYPDOG_WEBHOOK_SECRET` | 开发默认值 | Webhook 签名使用的 HMAC-SHA256 共享秘钥；生产必须使用随机值 |
 | `webhook.max_retries` | - | `3` | 回调失败时的最大重试次数 |
 | `webhook.timeout_sec` | - | `5` | 单次回调商户接口的 HTTP 超时时间（秒） |
 | `webhook.allow_local` | `WEBHOOK_ALLOW_LOCAL` | `false` | 是否允许回调本地回环地址（`localhost` / `127.0.0.1`）。本地联调设为 `true`，**生产环境必须为 false 以严格防御 SSRF 攻击** |
@@ -87,11 +87,11 @@ chains:
 
 ## 3. 生产环境安全校验规则 (`ValidateProduction`)
 
-当配置中 `env: "production"` 时，系统启动时会自动执行严苛的安全审查。若存在以下任意风险项，**服务将主动阻断（Panic Exit）并打印错误日志**：
+当配置中 `env: "production"` 时，系统启动时会自动执行安全审查。若存在以下任意风险项，**服务将拒绝启动并返回配置错误**：
 
 1. **弱口令检查**：
-   - `server.secret` 严禁使用默认值 `crypdog-secret-key-123456`，且长度必须 $\ge 16$ 字符。
-   - `webhook.webhook_secret` 严禁使用默认值 `crypdog-webhook-secret-987654`，且长度必须 $\ge 16$ 字符。
+   - `server.secret` 严禁使用代码中的开发默认值，且长度必须 $\ge 16$ 字符。
+   - `webhook.webhook_secret` 严禁使用代码中的开发默认值，且长度必须 $\ge 16$ 字符。
 2. **SSRF 防御阻断**：
    - `webhook.allow_local` 必须为 `false`。严禁向局域网内部私网 IP 发起回调，防止内网探测渗透。
 3. **模拟入账阻断**：
@@ -108,16 +108,16 @@ chains:
 ```ini
 APP_ENV=production
 CRYPDOG_PORT=8080
-CRYPDOG_SECRET=3f98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
-CRYPDOG_ADMIN_SECRET=5a98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
-CRYPDOG_WEBHOOK_SECRET=8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b
+CRYPDOG_SECRET=<random-secret-at-least-16-characters>
+CRYPDOG_ADMIN_SECRET=<different-random-secret>
+CRYPDOG_WEBHOOK_SECRET=<different-random-secret>
 CRYPDOG_ENABLE_SIMULATION=false
-CRYPDOG_METRICS_SECRET=9c98a2b0c1e4d7f6a8b2c4d6e8f0a2b4
+CRYPDOG_METRICS_SECRET=<random-metrics-secret>
 CRYPDOG_ALLOWED_ORIGINS=https://admin.example.com
 WEBHOOK_ALLOW_LOCAL=false
 
 DB_DRIVER=postgres
-DB_DSN=host=postgres-prod.internal user=crypdog password=StrongSecretPassword123 dbname=crypdog port=5432 sslmode=require
+DB_DSN=host=postgres-prod.internal user=crypdog password=<database-password> dbname=crypdog port=5432 sslmode=require
 
 LOG_LEVEL=warn
 LOG_FORMAT=json
@@ -126,3 +126,5 @@ LOG_OUTPUT=stdout
 METRICS_ENABLED=true
 PPROF_ENABLED=false
 ```
+
+> 以上值均为占位符，不要直接复制到生产环境。完整的 Docker Compose 部署流程见[生产部署](../deployment/production.md)，上线前请逐项执行[检查清单](../deployment/checklist.md)。

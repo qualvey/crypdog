@@ -6,5 +6,7 @@ server
 .env
 /demo
 /dist
+/site
+.venv-docs/
 *mermaid_test*
 *db-*

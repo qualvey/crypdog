@@ -42,7 +42,7 @@
 ```http
 GET /api/v1/watcher/options HTTP/1.1
 Host: 127.0.0.1:8080
-Authorization: Bearer crypdog-secret-key-123456
+Authorization: Bearer <CRYPDOG_SECRET>
 ```
 
 #### 响应示例 (200 OK)
@@ -143,7 +143,7 @@ Authorization: Bearer crypdog-secret-key-123456
 #### 请求示例
 ```http
 GET /api/v1/watcher/intents/ORDER-20260919-001 HTTP/1.1
-Authorization: Bearer crypdog-secret-key-123456
+Authorization: Bearer <CRYPDOG_SECRET>
 ```
 
 #### 响应示例 (200 OK)
@@ -182,7 +182,7 @@ Authorization: Bearer crypdog-secret-key-123456
 #### 请求示例
 ```http
 POST /api/v1/watcher/intents/ORDER-20260919-001/cancel HTTP/1.1
-Authorization: Bearer crypdog-secret-key-123456
+Authorization: Bearer <CRYPDOG_SECRET>
 ```
 
 ---
@@ -240,7 +240,8 @@ import { Request, Response } from 'express';
 
 export function verifyWebhook(req: Request, res: Response) {
   const signature = req.headers['x-signature-sha256'] as string;
-  const webhookSecret = process.env.WEBHOOK_SECRET || 'crypdog-webhook-secret-987654';
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  if (!webhookSecret) throw new Error('WEBHOOK_SECRET is required');
 
   // 必须使用原始未经解析的 Raw Body 字节流进行校验
   const rawBody = (req as any).rawBody || JSON.stringify(req.body);

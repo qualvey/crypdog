@@ -1,6 +1,6 @@
 Invoke-RestMethod -Uri "http://localhost:8080/api/v1/watcher/intents" -Method Post -Headers @{
     "Content-Type" = "application/json"
-    "Authorization" = "Bearer crypdog-secret-key-123456"
+    "Authorization" = "Bearer <CRYPDOG_SECRET>"
 } -Body (@{
     orderId = "MY-ORDER-333"
     chain = "ARBITRUM"          # 👈 建议写大写无空格简码 "ARBITRUM"
