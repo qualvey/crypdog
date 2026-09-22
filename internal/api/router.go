@@ -1,9 +1,10 @@
 package api
 
 import (
+	"crypdog/internal/logger"
 	"crypto/subtle"
 	"io"
-	"log"
+
 	"net/http"
 	"net/http/pprof"
 	"strings"
@@ -236,12 +237,12 @@ func SetupRouter(h *Handler) *gin.Engine {
 
 			// Verify HMAC signature
 			isValid := signature.VerifyHMACSHA256(bodyBytes, h.cfg.Webhook.Secret, sig)
-			log.Printf("==================================================")
-			log.Printf("[Mock Webhook Target] Received Webhook Payload!")
-			log.Printf("Header X-Signature-SHA256: %s", sig)
-			log.Printf("Payload Body: %s", string(bodyBytes))
-			log.Printf("HMAC Verification Result: %v (Valid: %t)", sig, isValid)
-			log.Printf("==================================================")
+			logger.Printf("==================================================")
+			logger.Printf("[Mock Webhook Target] Received Webhook Payload!")
+			logger.Printf("Header X-Signature-SHA256: %s", sig)
+			logger.Printf("Payload Body: %s", string(bodyBytes))
+			logger.Printf("HMAC Verification Result: %v (Valid: %t)", sig, isValid)
+			logger.Printf("==================================================")
 
 			if !isValid {
 				c.JSON(http.StatusUnauthorized, gin.H{

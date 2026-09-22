@@ -3,11 +3,12 @@ package scanner
 import (
 	"context"
 	"crypdog/internal/config"
+	"crypdog/internal/logger"
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
 	"encoding/json"
 	"fmt"
-	"log"
+
 	"math/rand"
 	"net/http"
 	"strings"
@@ -152,7 +153,7 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 	if interval <= 0 {
 		interval = 3 * time.Second // 兜底安全默认值
 	}
-	log.Printf("[TronScanner] Started TRON blockchain scanner daemon (Interval: %ds)", interval)
+	logger.Printf("[TronScanner] Started TRON blockchain scanner daemon (Interval: %ds)", interval)
 
 	for {
 		select {
@@ -163,7 +164,7 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 		t.scanOnce(ctx, transferChan)
 		select {
 		case <-ctx.Done():
-			log.Printf("[TronScanner] Scanner stopped gracefully")
+			logger.Printf("[TronScanner] Scanner stopped gracefully")
 			return ctx.Err()
 		case <-time.After(interval):
 		}
@@ -300,7 +301,7 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		log.Printf("[TronScanner] ⚠️ 触发 TronGrid API 限流 (429 Too Many Requests)，本周期等待退避")
+		logger.Printf("[TronScanner] ⚠️ 触发 TronGrid API 限流 (429 Too Many Requests)，本周期等待退避")
 		metrics.RecordScanError(string(model.ChainTron), "rate_limit")
 		return
 	}
@@ -332,7 +333,7 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		spec, isKnown := t.tokens[contractAddr]
 		t.tokensMu.RUnlock()
 		if !isKnown {
-			log.Printf("[TronScanner Security] 拦截非白名单或伪造代币: Contract=%s, FakeSymbol=%s, Tx=%s, To=%s",
+			logger.Printf("[TronScanner Security] 拦截非白名单或伪造代币: Contract=%s, FakeSymbol=%s, Tx=%s, To=%s",
 				contractAddr, tx.TokenInfo.Symbol, tx.TransactionID, tx.To)
 			continue
 		}
@@ -462,7 +463,7 @@ func (t *TronScanner) SimulateTransfer(ctx context.Context, toAddress string, am
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case transferChan <- transfer:
-		log.Printf("[TronScanner] [MOCK] 已模拟充值事件: TxHash=%s, To=%s, Amount=%s %s",
+		logger.Printf("[TronScanner] [MOCK] 已模拟充值事件: TxHash=%s, To=%s, Amount=%s %s",
 			txHash, target, amount.StringFixed(4), token)
 		return txHash, nil
 	case <-time.After(3 * time.Second):

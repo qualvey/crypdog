@@ -23,6 +23,7 @@ log:
   format: "text"      # "text" 或 "json"
   output: "stdout"    # "stdout" 或 "file"
   file_path: ""       # 日志落盘路径
+  timestamp: true      # 文本日志是否输出时间戳
 
 metrics:
   enabled: true

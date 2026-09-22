@@ -7,7 +7,7 @@ import (
 	"crypdog/internal/metrics"
 	"crypdog/internal/model"
 	"fmt"
-	"log"
+
 	"math"
 	"math/big"
 	"strings"
@@ -156,7 +156,7 @@ func (s *EvmScanner) getBlockTimestamp(ctx context.Context, blockNumber uint64) 
 
 	chainTs, err := s.client.GetBlockTimestamp(ctx, blockNumber)
 	if err != nil || chainTs <= 0 {
-		log.Printf("[%s Scanner] 无法从 RPC 获取区块 %d 时间戳: %v", s.Chain(), blockNumber, err)
+		logger.Printf("[%s Scanner] 无法从 RPC 获取区块 %d 时间戳: %v", s.Chain(), blockNumber, err)
 		return time.Now().Unix()
 	}
 
@@ -174,11 +174,11 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 	if e.cfg != nil && e.cfg.ScanIntervalSec > 0 {
 		interval = time.Duration(e.cfg.ScanIntervalSec) * time.Second
 	}
-	log.Printf("[%s Scanner] 启动 EVM 扫描守护协程 (扫描间隔: %v)", e.Chain(), interval)
+	logger.Printf("[%s Scanner] 启动 EVM 扫描守护协程 (扫描间隔: %v)", e.Chain(), interval)
 	// 1. 初始化游标：必须成功才能开启事件循环；网络抖动时做指数退避重试
 	for {
 		if err := e.initCursor(ctx); err != nil {
-			log.Printf("[%s Scanner] 初始化游标失败，5秒后重试: %v", e.Chain(), err)
+			logger.Printf("[%s Scanner] 初始化游标失败，5秒后重试: %v", e.Chain(), err)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -191,7 +191,7 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 	// 3. 立即执行首次扫描并快速追平历史落后块
 	for {
 		if err := e.scanNextBlocks(ctx, transferChan); err != nil {
-			log.Printf("[%s Scanner] 首次扫块异常: %v", e.Chain(), err)
+			logger.Printf("[%s Scanner] 首次扫块异常: %v", e.Chain(), err)
 			break
 		}
 		if e.lastScannedBlock+5 >= e.latestBlock.Load() || ctx.Err() != nil {
@@ -205,14 +205,14 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[%s Scanner] 收到上下文退出信号，安全停止", e.Chain())
+			logger.Printf("[%s Scanner] 收到上下文退出信号，安全停止", e.Chain())
 			return ctx.Err()
 
 		case <-ticker.C:
 			// 周期性触发扫块；若滞后则快速连续追赶
 			for {
 				if err := e.scanNextBlocks(ctx, transferChan); err != nil {
-					log.Printf("[%s Scanner] 扫块异常: %v", e.Chain(), err)
+					logger.Printf("[%s Scanner] 扫块异常: %v", e.Chain(), err)
 					break
 				}
 				if e.lastScannedBlock+5 >= e.latestBlock.Load() || ctx.Err() != nil {
@@ -249,7 +249,7 @@ func (e *EvmScanner) initCursor(ctx context.Context) error {
 		// 2. DB 查不到，若配置中配置了 StartBlock，则优先使用
 		if e.cfg.StartBlock > 0 {
 			e.lastScannedBlock = e.cfg.StartBlock - 1
-			log.Printf("[%s Scanner] 未发现历史进度，采用配置的起始高度: %d", e.Chain(), e.cfg.StartBlock)
+			logger.Printf("[%s Scanner] 未发现历史进度，采用配置的起始高度: %d", e.Chain(), e.cfg.StartBlock)
 			return nil
 		}
 
@@ -264,7 +264,7 @@ func (e *EvmScanner) initCursor(ctx context.Context) error {
 		} else {
 			e.lastScannedBlock = 0
 		}
-		log.Printf("[%s Scanner] 未配置历史进度，默认从链上安全高度开始: %d (最新: %d, 冗余: %d)",
+		logger.Printf("[%s Scanner] 未配置历史进度，默认从链上安全高度开始: %d (最新: %d, 冗余: %d)",
 			e.Chain(), e.lastScannedBlock, latestOnChain, safetyMargin)
 	}
 
@@ -354,7 +354,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			cleanData = "0"
 		}
 		if _, ok := amountBig.SetString(cleanData, 16); !ok {
-			log.Printf("[%s Scanner] 解析金额失败，跳过: tx=%s", e.Chain(), l.TransactionHash)
+			logger.Printf("[%s Scanner] 解析金额失败，跳过: tx=%s", e.Chain(), l.TransactionHash)
 			continue
 		}
 
@@ -403,7 +403,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 			return ctx.Err()
 		case transferChan <- transfer:
 			metrics.RecordTransferCaptured(string(e.Chain()), string(transfer.Token))
-			log.Printf("[%s Scanner] 捕获充值: Tx=%s, To=%s, Token=%s, Amount=%s, RawAmount=%s, Block=%d",
+			logger.Printf("[%s Scanner] 捕获充值: Tx=%s, To=%s, Token=%s, Amount=%s, RawAmount=%s, Block=%d",
 				e.Chain(), transfer.TxHash, transfer.TargetAddress, transfer.Token, transfer.Amount.String(), transfer.RawValue, transfer.BlockNumber)
 		}
 	}

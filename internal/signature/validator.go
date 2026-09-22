@@ -12,10 +12,11 @@ import (
 )
 
 var (
-	ErrInvalidWebhookURL = errors.New("invalid webhook url")
-	ErrDisallowedScheme  = errors.New("webhook url scheme must be http or https")
-	ErrSSRFProtection    = errors.New("webhook url targets restricted or private infrastructure")
-	ErrInvalidAddress    = errors.New("invalid wallet address format")
+	ErrInvalidWebhookURL  = errors.New("invalid webhook url")
+	ErrDisallowedScheme   = errors.New("webhook url scheme must be http or https")
+	ErrSSRFProtection     = errors.New("webhook url targets restricted or private infrastructure")
+	ErrUnspecifiedAddress = errors.New("webhook url cannot use an unspecified address")
+	ErrInvalidAddress     = errors.New("invalid wallet address format")
 )
 
 // ValidateWebhookURL 校验 Webhook URL 的合法性与 SSRF 安全防御
@@ -50,7 +51,7 @@ func ValidateWebhookURL(rawURL string, allowLocal bool) error {
 	ip := net.ParseIP(hostname)
 	if ip != nil {
 		if ip.IsUnspecified() {
-			return fmt.Errorf("%w: unspecified address forbidden", ErrSSRFProtection)
+			return fmt.Errorf("%w: %w; use localhost/127.0.0.1 for local development or a reachable host name", ErrSSRFProtection, ErrUnspecifiedAddress)
 		}
 		if ip.IsMulticast() {
 			return fmt.Errorf("%w: multicast address forbidden", ErrSSRFProtection)

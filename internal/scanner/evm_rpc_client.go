@@ -3,10 +3,11 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypdog/internal/logger"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+
 	"math/big"
 	"net/http"
 	"strconv"
@@ -257,7 +258,7 @@ func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMess
 		if err == nil {
 			if i > 0 {
 				c.currentIndex.Store(uint32(currIdx))
-				log.Printf("[EvmRPCClient Failover] ✅ 成功切换并恢复至备用节点 [%s]", nodeURL)
+				logger.Printf("[EvmRPCClient Failover] ✅ 成功切换并恢复至备用节点 [%s]", nodeURL)
 			}
 			return result, nil
 		}
@@ -265,7 +266,7 @@ func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMess
 		lastErr = err
 		if numNodes > 1 {
 			nextIdx := (currIdx + 1) % numNodes
-			log.Printf("[EvmRPCClient Failover] ⚠️ 节点 [%s] 调用失败 (%v)，正在切换尝试备用节点 [%s]...", nodeURL, err, c.rpcURLs[nextIdx])
+			logger.Printf("[EvmRPCClient Failover] ⚠️ 节点 [%s] 调用失败 (%v)，正在切换尝试备用节点 [%s]...", nodeURL, err, c.rpcURLs[nextIdx])
 		}
 	}
 

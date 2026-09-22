@@ -165,7 +165,11 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 	// 校验 Webhook URL 防御 SSRF（生产环境默认严禁私网/回环地址）
 	allowLocal := h.cfg != nil && h.cfg.Webhook.AllowLocal
 	if err := signature.ValidateWebhookURL(req.WebhookURL, allowLocal); err != nil {
-		logger.Info("Webhook validate failed %v", err)
+		logger.WarnContext(c.Request.Context(), "webhook target rejected",
+			"error_code", "WEBHOOK_TARGET_INVALID",
+			"validation_reason", err.Error(),
+			"allow_local", allowLocal,
+		)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": fmt.Sprintf("Invalid webhookUrl: %v", err),

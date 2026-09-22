@@ -21,7 +21,11 @@ func TestValidateWebhookURL(t *testing.T) {
 	assert.Error(t, ValidateWebhookURL("http://169.254.169.254/latest/meta-data/", true))
 
 	// 4. Unspecified / 0.0.0.0
-	assert.Error(t, ValidateWebhookURL("http://0.0.0.0:8080/webhook", false))
+	err := ValidateWebhookURL("http://0.0.0.0:8080/webhook", false)
+	assert.ErrorIs(t, err, ErrSSRFProtection)
+	assert.ErrorIs(t, err, ErrUnspecifiedAddress)
+	assert.Contains(t, err.Error(), "use localhost/127.0.0.1")
+	assert.Error(t, ValidateWebhookURL("http://[::]:8080/webhook", true))
 
 	// 5. Localhost with allowLocal flag
 	assert.Error(t, ValidateWebhookURL("http://127.0.0.1:8080/webhook", false))

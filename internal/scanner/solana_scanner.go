@@ -3,9 +3,10 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypdog/internal/logger"
 	"encoding/json"
 	"fmt"
-	"log"
+
 	"net/http"
 	"strings"
 	"sync"
@@ -111,14 +112,14 @@ func (s *SolanaScanner) Start(ctx context.Context, transferChan chan<- model.Cha
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop() // 1. 必加：防止 timer 泄露
-	log.Printf("[SolanaScanner] Started SOLANA scanner daemon (Interval: %v)", interval)
+	logger.Printf("[SolanaScanner] Started SOLANA scanner daemon (Interval: %v)", interval)
 
 	s.scanActiveAddresses(ctx, transferChan)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[SolanaScanner] Stopped: %v", ctx.Err())
+			logger.Printf("[SolanaScanner] Stopped: %v", ctx.Err())
 			return ctx.Err() // 2. 惯用法：返回 context 错误
 		case <-ticker.C:
 			s.scanActiveAddresses(ctx, transferChan)
@@ -284,7 +285,7 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 		batch, err := s.getSignaturesForAddress(ctx, queryAddr, lastSig, before)
 		if err != nil {
 			metrics.RecordScanError("SOLANA", "solana")
-			log.Printf("[SolanaScanner] 获取地址 %s 签名失败: %v", queryAddr, err)
+			logger.Printf("[SolanaScanner] 获取地址 %s 签名失败: %v", queryAddr, err)
 			return
 		}
 		if len(batch) == 0 {
@@ -335,7 +336,7 @@ func (s *SolanaScanner) scanAddressStream(ctx context.Context, queryAddr, target
 		}
 
 		if err := s.processTransaction(ctx, sigInfo.Signature, targetOwner, cutoff, ch); err != nil {
-			log.Printf("[SolanaScanner] 解析处理交易 %s 失败: %v", sigInfo.Signature, err)
+			logger.Printf("[SolanaScanner] 解析处理交易 %s 失败: %v", sigInfo.Signature, err)
 			return // 发生错误停止继续推进，保留未处理签名以便下一周期重试
 		}
 

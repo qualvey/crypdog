@@ -2,6 +2,8 @@ package logger
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -112,4 +114,83 @@ func TestConcurrentSetLevel(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestStructuredLogSchema(t *testing.T) {
+	oldFormat := currentFormat
+	currentFormat = "text"
+	buf := &bytes.Buffer{}
+	SetOutput(buf)
+	defer func() {
+		currentFormat = oldFormat
+		ResetOutput()
+	}()
+	SetLevel("info")
+
+	ctx := WithRequestID(context.Background(), "request-123")
+	InfoContext(ctx, "webhook target rejected", "error_code", "WEBHOOK_TARGET_INVALID")
+
+	out := buf.String()
+	for _, field := range []string{
+		"[INFO]",
+		"webhook target rejected",
+		"[logger logger_test.go:",
+		"request_id=request-123",
+		"error_code=WEBHOOK_TARGET_INVALID",
+	} {
+		if !strings.Contains(out, field) {
+			t.Fatalf("structured log missing %q: %s", field, out)
+		}
+	}
+	if strings.Contains(out, "level=INFO") {
+		t.Fatalf("text logs must not expose slog level fields: %s", out)
+	}
+}
+
+func TestStructuredJSONLogSchema(t *testing.T) {
+	oldFormat := currentFormat
+	currentFormat = "json"
+	buf := &bytes.Buffer{}
+	SetOutput(buf)
+	defer func() {
+		currentFormat = oldFormat
+		ResetOutput()
+	}()
+	SetLevel("info")
+
+	Info("json schema test")
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("expected one JSON log entry, got %q: %v", buf.String(), err)
+	}
+	for _, field := range []string{"time", "level", "msg", "component", "source"} {
+		if _, ok := entry[field]; !ok {
+			t.Fatalf("JSON log missing %q: %v", field, entry)
+		}
+	}
+	if entry["level"] != "INFO" || entry["msg"] != "json schema test" {
+		t.Fatalf("unexpected JSON log values: %v", entry)
+	}
+}
+
+func TestTextTimestampCanBeDisabled(t *testing.T) {
+	oldFormat := currentFormat
+	oldTimestamp := currentTimestamp
+	currentFormat = "text"
+	currentTimestamp = false
+	buf := &bytes.Buffer{}
+	SetOutput(buf)
+	defer func() {
+		currentFormat = oldFormat
+		currentTimestamp = oldTimestamp
+		ResetOutput()
+	}()
+	SetLevel("info")
+
+	Info("timestamp disabled")
+
+	if !strings.HasPrefix(buf.String(), "[INFO]") {
+		t.Fatalf("timestamp should be omitted from text log: %s", buf.String())
+	}
 }

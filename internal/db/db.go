@@ -1,8 +1,9 @@
 package db
 
 import (
+	"crypdog/internal/logger"
 	"fmt"
-	"log"
+
 	"strings"
 	"time"
 
@@ -32,15 +33,15 @@ func InitDB(cfg *config.Config) *gorm.DB {
 			}
 			dsn = fmt.Sprintf("%s%s_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", dsn, delimiter)
 		}
-		log.Println("⚠️ [Database Notice] 当前使用 SQLite。生产环境或多副本集群部署建议切换为 PostgreSQL。已自动配置 WAL 模式与 5s 忙等待防锁。")
+		logger.Println("⚠️ [Database Notice] 当前使用 SQLite。生产环境或多副本集群部署建议切换为 PostgreSQL。已自动配置 WAL 模式与 5s 忙等待防锁。")
 		DB, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	}
 
 	if err != nil {
-		log.Fatalf("Failed to connect to database (%s): %v", cfg.Database.Driver, err)
+		logger.Fatalf("Failed to connect to database (%s): %v", cfg.Database.Driver, err)
 	}
 
-	log.Printf("Successfully connected to database (%s)", cfg.Database.Driver)
+	logger.Printf("Successfully connected to database (%s)", cfg.Database.Driver)
 
 	// Auto migrate tables
 	err = DB.AutoMigrate(
@@ -53,10 +54,10 @@ func InitDB(cfg *config.Config) *gorm.DB {
 		&model.ChainToken{},
 	)
 	if err != nil {
-		log.Fatalf("Failed to auto-migrate database schema: %v", err)
+		logger.Fatalf("Failed to auto-migrate database schema: %v", err)
 	}
 
-	log.Println("Database auto-migration completed successfully")
+	logger.Println("Database auto-migration completed successfully")
 
 	// 播种初始默认代币与收款钱包
 	seedInitialTokens(DB)
@@ -64,7 +65,7 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	sqlDB, err := DB.DB()
 	if err != nil {
-		log.Fatalf("Failed to get generic database object: %v", err)
+		logger.Fatalf("Failed to get generic database object: %v", err)
 	}
 
 	// 设置最大空闲连接数

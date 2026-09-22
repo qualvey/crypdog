@@ -2,7 +2,8 @@ package queue
 
 import (
 	"context"
-	"log"
+	"crypdog/internal/logger"
+
 	"time"
 
 	"crypdog/internal/model"
@@ -25,7 +26,7 @@ func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[IntentCleaner] 收到停止信号，清理守护进程平稳退出")
+			logger.Println("[IntentCleaner] 收到停止信号，清理守护进程平稳退出")
 			return
 		case <-ticker.C:
 			c.safeCleanExpiredIntents()
@@ -37,7 +38,7 @@ func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration
 func (c *IntentCleaner) safeCleanExpiredIntents() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[IntentCleaner PANIC RECOVER] 清理任务执行异常: %v", r)
+			logger.Printf("[IntentCleaner PANIC RECOVER] 清理任务执行异常: %v", r)
 		}
 	}()
 
@@ -50,11 +51,11 @@ func (c *IntentCleaner) cleanExpiredIntents() {
 		Update("status", model.StatusExpired)
 
 	if res.Error != nil {
-		log.Printf("[Cleaner] Error cleaning expired intents: %v", res.Error)
+		logger.Printf("[Cleaner] Error cleaning expired intents: %v", res.Error)
 		return
 	}
 
 	if res.RowsAffected > 0 {
-		log.Printf("[Cleaner] Automatically expired %d outdated payment intents", res.RowsAffected)
+		logger.Printf("[Cleaner] Automatically expired %d outdated payment intents", res.RowsAffected)
 	}
 }

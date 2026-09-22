@@ -1,8 +1,6 @@
 package main
 
 import (
-	"log"
-
 	"crypdog/internal/app"
 	"crypdog/internal/config"
 	"crypdog/internal/db"
@@ -16,11 +14,11 @@ func main() {
 
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("配置加载失败: %v", err)
+		logger.Fatalf("配置加载失败: %v", err)
 	}
 
 	// 初始化统一日志系统
-	logger.Init(cfg.Log.Level, cfg.Log.Format, cfg.Log.Output, cfg.Log.FilePath)
+	logger.Init(cfg.Log.Level, cfg.Log.Format, cfg.Log.Output, cfg.Log.FilePath, cfg.Log.Timestamp)
 
 	logger.Info("🐕 Starting CrypDog (Crypto Payment Watchdog Daemon)")
 
@@ -28,7 +26,7 @@ func main() {
 	database := db.InitDB(cfg)
 	App := app.NewApp(cfg, database)
 	if err := App.Run(); err != nil {
-		log.Fatal(err)
+		logger.Fatal("%v", err)
 	}
-	log.Println("🐕 CrypDog 已安全平稳停止")
+	logger.Println("🐕 CrypDog 已安全平稳停止")
 }

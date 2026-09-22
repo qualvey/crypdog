@@ -3,11 +3,12 @@ package queue
 import (
 	"bytes"
 	"context"
+	"crypdog/internal/logger"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+
 	"net"
 	"net/http"
 	"strings"
@@ -127,7 +128,7 @@ func (w *WebhookDispatcher) StartRetryWorker(ctx context.Context, interval time.
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[WebhookRetryWorker] 收到退出信号，停止补偿重试")
+			logger.Println("[WebhookRetryWorker] 收到退出信号，停止补偿重试")
 			return
 		case <-ticker.C:
 			w.retryPendingLogs(ctx)
@@ -138,7 +139,7 @@ func (w *WebhookDispatcher) StartRetryWorker(ctx context.Context, interval time.
 func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[WebhookRetryWorker PANIC RECOVER]: %v", r)
+			logger.Printf("[WebhookRetryWorker PANIC RECOVER]: %v", r)
 		}
 	}()
 
@@ -182,7 +183,7 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 			continue // 已被并发消费，跳过
 		}
 
-		log.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, Event=%s, NextAttempt=%d", l.OrderID, event, l.Attempt+1)
+		logger.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, Event=%s, NextAttempt=%d", l.OrderID, event, l.Attempt+1)
 		w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, l.Attempt+1)
 	}
 }
@@ -221,7 +222,7 @@ func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash st
 func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload WebhookPayload, attempt int) {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[Webhook] Marshal error for order %s: %v", orderID, err)
+		logger.Printf("[Webhook] Marshal error for order %s: %v", orderID, err)
 		return
 	}
 
@@ -229,7 +230,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		log.Printf("[Webhook] Failed to create request for order %s: %v", orderID, err)
+		logger.Printf("[Webhook] Failed to create request for order %s: %v", orderID, err)
 		return
 	}
 
@@ -237,7 +238,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	req.Header.Set("X-Signature-SHA256", sig)
 	req.Header.Set("User-Agent", "CrypDog-Webhook-Guardian/1.0")
 
-	log.Printf("[Webhook] Sending notification to %s (Order: %s, Event: %s, Attempt: %d)", webhookURL, orderID, payload.Event, attempt)
+	logger.Printf("[Webhook] Sending notification to %s (Order: %s, Event: %s, Attempt: %d)", webhookURL, orderID, payload.Event, attempt)
 
 	startTime := time.Now()
 	resp, err := w.client.Do(req)
@@ -279,19 +280,19 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	if success {
 		metrics.RecordWebhookDispatch("success", durationSec)
-		log.Printf("[Webhook] Successfully delivered webhook for Order: %s", orderID)
+		logger.Printf("[Webhook] Successfully delivered webhook for Order: %s", orderID)
 		return
 	}
 
-	log.Printf("[Webhook] Delivery failed for Order: %s (Status: %d, Attempt: %d)", orderID, webhookLog.StatusCode, attempt)
+	logger.Printf("[Webhook] Delivery failed for Order: %s (Status: %d, Attempt: %d)", orderID, webhookLog.StatusCode, attempt)
 
 	// 重试彻底收拢至 StartRetryWorker 单一持久化队列驱动，严禁在此启动 time.AfterFunc 导致双重触发
 	if attempt < w.maxAttempts() {
 		metrics.RecordWebhookDispatch("retry", durationSec)
-		log.Printf("[Webhook] 订单 %s 投递失败，下一次重试将在 %v 后由持久化 Worker 统一驱动 (Attempt: %d)",
+		logger.Printf("[Webhook] 订单 %s 投递失败，下一次重试将在 %v 后由持久化 Worker 统一驱动 (Attempt: %d)",
 			orderID, nextDelay, attempt+1)
 	} else {
 		metrics.RecordWebhookDispatch("max_retried", durationSec)
-		log.Printf("[Webhook] Exceeded max retries for Order: %s", orderID)
+		logger.Printf("[Webhook] Exceeded max retries for Order: %s", orderID)
 	}
 }

@@ -2,9 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypdog/internal/logger"
 	"errors"
 	"fmt"
-	"log"
+
 	"strings"
 	"sync"
 	"time"
@@ -104,7 +105,7 @@ func (e *MatcherEngine) matchAndSettle(transfer *model.ChainTransfer, currentBlo
 		if expErr == nil && len(expiredIntents) > 0 {
 			matchedIntent = e.findMatchedIntent(expiredIntents, transfer.Amount)
 			if matchedIntent != nil {
-				log.Printf("[Matcher] ⏰ 捕获超时迟到充值订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
+				logger.Printf("[Matcher] ⏰ 捕获超时迟到充值订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
 					matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
 			}
 		}
@@ -112,13 +113,13 @@ func (e *MatcherEngine) matchAndSettle(transfer *model.ChainTransfer, currentBlo
 
 	if matchedIntent == nil {
 		metrics.RecordTransferMatch(string(transfer.Chain), false)
-		log.Printf("[Matcher] 未找到匹配候选意向: Chain=%s, Token=%s, To=%s, Amount=%s, Tx=%s",
+		logger.Printf("[Matcher] 未找到匹配候选意向: Chain=%s, Token=%s, To=%s, Amount=%s, Tx=%s",
 			transfer.Chain, transfer.Token, transfer.TargetAddress, transfer.Amount.String(), transfer.TxHash)
 		return nil
 	}
 
 	metrics.RecordTransferMatch(string(transfer.Chain), true)
-	log.Printf("[Matcher] 🎉 成功匹配订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
+	logger.Printf("[Matcher] 🎉 成功匹配订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
 		matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
 
 	// 4. 状态推进与结算（事务 + 触发通知）
@@ -179,10 +180,10 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 		valid, err := e.txVerifier(verifyCtx, transfer.Chain, transfer.TxHash, transfer.BlockNumber)
 		cancel()
 		if err != nil {
-			log.Printf("[Matcher] ⚠️ 快速确认二次核验交易失败(RPC抖动暂不推进为PAID，交由ConfirmationWorker重试): tx=%s, err=%v", transfer.TxHash, err)
+			logger.Printf("[Matcher] ⚠️ 快速确认二次核验交易失败(RPC抖动暂不推进为PAID，交由ConfirmationWorker重试): tx=%s, err=%v", transfer.TxHash, err)
 			isPaid = false
 		} else if !valid {
-			log.Printf("[Matcher ALARM] 🚨 拦截链上假充值/已Revert交易: Order=%s, Tx=%s, Chain=%s", intent.OrderID, transfer.TxHash, transfer.Chain)
+			logger.Printf("[Matcher ALARM] 🚨 拦截链上假充值/已Revert交易: Order=%s, Tx=%s, Chain=%s", intent.OrderID, transfer.TxHash, transfer.Chain)
 			return fmt.Errorf("transaction verification failed: invalid or reverted tx %s", transfer.TxHash)
 		}
 	}

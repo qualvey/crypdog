@@ -57,6 +57,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | `log.format` | `LOG_FORMAT` | `text` | 日志格式：开发环境用 `text`，生产容器环境推荐 `json` |
 | `log.output` | `LOG_OUTPUT` | `stdout` | 输出目标：`stdout` 或 `file` |
 | `log.file_path` | `LOG_FILE_PATH` | `""` | 当 output 为 file 时的磁盘写入路径 |
+| `log.timestamp` | `LOG_TIMESTAMP` | `true` | 文本日志是否输出 ISO-8601 时间戳；设为 `false` 可使用无时间戳的简洁格式 |
 | `metrics.enabled` | `METRICS_ENABLED` | `true` | 是否暴露 Prometheus 监控指标端点 |
 | `metrics.path` | `METRICS_PATH` | `/metrics` | 指标拉取路径 |
 | `metrics.secret` | `CRYPDOG_METRICS_SECRET` | 空 | 指标端点独立 Bearer 秘钥，生产环境启用 Metrics 时必须配置 |
