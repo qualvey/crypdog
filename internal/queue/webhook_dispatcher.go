@@ -62,6 +62,7 @@ func NewWebhookDispatcher(db *gorm.DB, cfg *config.Config) *WebhookDispatcher {
 	}
 
 	allowLocal := cfg != nil && cfg.Webhook.AllowLocal
+	requireHTTPS := cfg != nil && (strings.EqualFold(cfg.Env, "production") || strings.EqualFold(cfg.Env, "prod"))
 
 	dialer := &net.Dialer{
 		Timeout:   timeout,
@@ -114,7 +115,7 @@ func NewWebhookDispatcher(db *gorm.DB, cfg *config.Config) *WebhookDispatcher {
 					return errors.New("stopped after 5 redirects")
 				}
 				// 校验重定向目标 URL 防 SSRF 重定向绕过
-				return signature.ValidateWebhookURL(req.URL.String(), allowLocal)
+				return signature.ValidateWebhookURL(req.URL.String(), allowLocal, requireHTTPS)
 			},
 		},
 	}
@@ -223,6 +224,12 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
 		logger.Printf("[Webhook] Marshal error for order %s: %v", orderID, err)
+		return
+	}
+	allowLocal := w.cfg != nil && w.cfg.Webhook.AllowLocal
+	requireHTTPS := w.cfg != nil && (strings.EqualFold(w.cfg.Env, "production") || strings.EqualFold(w.cfg.Env, "prod"))
+	if err := signature.ValidateWebhookURL(webhookURL, allowLocal, requireHTTPS); err != nil {
+		logger.Printf("[Webhook] 拒绝不安全的回调地址 Order=%s: %v", orderID, err)
 		return
 	}
 

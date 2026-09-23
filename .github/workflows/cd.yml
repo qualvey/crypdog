@@ -108,15 +108,15 @@ jobs:
             fi
             test -w "$DEPLOY_PATH"
 
-      - name: Copy Compose file
+      - name: Copy production Compose file
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           port: ${{ secrets.SERVER_PORT || 22 }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          source: docker-compose.yml
-          target: ${{ env.DEPLOY_PATH }}
+           source: docker-compose.prod.yml
+           target: ${{ env.DEPLOY_PATH }}
 
       - name: Pull and restart service
         uses: appleboy/ssh-action@v1.2.2
@@ -143,17 +143,19 @@ jobs:
             if [ -n "${GHCR_TOKEN:-}" ]; then
               printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             fi
-            export CRYPDOG_IMAGE="$IMAGE"
+            printf 'CRYPDOG_IMAGE=%s\n' "$IMAGE" > .release.env.tmp
+            chmod 600 .release.env.tmp
+            mv .release.env.tmp .release.env
             # Remove containers from this Compose project before recreating
-            # them. This releases the published 8080 port from old revisions.
-            docker compose down --remove-orphans
-            docker compose pull crypdog
-            docker compose up -d --no-build crypdog
-            docker compose ps
-            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8081/healthz/live; then
+            # them. This releases the published 8081 host port from old revisions.
+            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env down --remove-orphans
+            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env pull crypdog
+            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build crypdog
+            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps
+            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8081/healthz/ready; then
               echo '=== crypdog container status ==='
-              docker compose ps -a
+              docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps -a
               echo '=== crypdog startup logs ==='
-              docker compose logs --no-color --tail=200 crypdog
+              docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env logs --no-color --tail=200 crypdog
               exit 1
             fi

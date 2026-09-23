@@ -10,6 +10,8 @@ func TestValidateWebhookURL(t *testing.T) {
 	// 1. Valid URLs
 	assert.NoError(t, ValidateWebhookURL("https://api.example.com/webhook", false))
 	assert.NoError(t, ValidateWebhookURL("http://api.example.com:8080/v1/webhook", false))
+	assert.NoError(t, ValidateWebhookURL("https://api.example.com/webhook", false, true))
+	assert.ErrorIs(t, ValidateWebhookURL("http://api.example.com/webhook", false, true), ErrHTTPSRequired)
 
 	// 2. Disallowed schemes
 	assert.ErrorIs(t, ValidateWebhookURL("ftp://api.example.com/webhook", false), ErrDisallowedScheme)

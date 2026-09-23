@@ -1,0 +1,41 @@
+services:
+  crypdog:
+    image: ${CRYPDOG_IMAGE:?set CRYPDOG_IMAGE to an immutable image reference}
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./config.yaml:/root/config.yaml:ro
+    environment:
+      APP_ENV: production
+      CRYPDOG_PORT: "8080"
+      CRYPDOG_SECRET: ${CRYPDOG_SECRET:?set CRYPDOG_SECRET to a strong secret}
+      CRYPDOG_ADMIN_SECRET: ${CRYPDOG_ADMIN_SECRET:?set CRYPDOG_ADMIN_SECRET to a strong admin secret}
+      CRYPDOG_WEBHOOK_SECRET: ${CRYPDOG_WEBHOOK_SECRET:?set CRYPDOG_WEBHOOK_SECRET to a strong secret}
+      CRYPDOG_ENABLE_SIMULATION: "false"
+      CRYPDOG_METRICS_SECRET: ${CRYPDOG_METRICS_SECRET:?set CRYPDOG_METRICS_SECRET to a strong metrics secret}
+      CRYPDOG_ALLOWED_ORIGINS: ${CRYPDOG_ALLOWED_ORIGINS:-}
+      WEBHOOK_ALLOW_LOCAL: "false"
+      DB_DRIVER: postgres
+      DB_DSN: host=postgres user=${POSTGRES_USER:-crypdog} password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD to a strong password} dbname=${POSTGRES_DB:-crypdog} port=5432 sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-crypdog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD to a strong password}
+      POSTGRES_DB: ${POSTGRES_DB:-crypdog}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+volumes:
+  pgdata:

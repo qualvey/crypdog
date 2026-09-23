@@ -4,6 +4,7 @@ config.yaml
 crypdog
 server
 .env
+.release.env
 /demo
 /dist
 /site

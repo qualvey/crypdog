@@ -14,6 +14,7 @@ import (
 var (
 	ErrInvalidWebhookURL  = errors.New("invalid webhook url")
 	ErrDisallowedScheme   = errors.New("webhook url scheme must be http or https")
+	ErrHTTPSRequired      = errors.New("webhook url must use https in production")
 	ErrSSRFProtection     = errors.New("webhook url targets restricted or private infrastructure")
 	ErrUnspecifiedAddress = errors.New("webhook url cannot use an unspecified address")
 	ErrInvalidAddress     = errors.New("invalid wallet address format")
@@ -21,7 +22,7 @@ var (
 
 // ValidateWebhookURL 校验 Webhook URL 的合法性与 SSRF 安全防御
 // allowLocal 用于本地开发或单测时允许 localhost
-func ValidateWebhookURL(rawURL string, allowLocal bool) error {
+func ValidateWebhookURL(rawURL string, allowLocal bool, requireHTTPS ...bool) error {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return ErrInvalidWebhookURL
@@ -35,6 +36,9 @@ func ValidateWebhookURL(rawURL string, allowLocal bool) error {
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return ErrDisallowedScheme
+	}
+	if len(requireHTTPS) > 0 && requireHTTPS[0] && scheme != "https" {
+		return ErrHTTPSRequired
 	}
 
 	hostname := u.Hostname()
