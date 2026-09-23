@@ -118,7 +118,7 @@ jobs:
           source: docker-compose.prod.yml
           target: ${{ env.DEPLOY_PATH }}
 
-      - name: Pull and restart service
+      - name: Pull and recreate production service
         uses: appleboy/ssh-action@v1.2.2
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
@@ -146,12 +146,24 @@ jobs:
             printf 'CRYPDOG_IMAGE=%s\n' "$IMAGE" > .release.env.tmp
             chmod 600 .release.env.tmp
             mv .release.env.tmp .release.env
-            # Remove containers from this Compose project before recreating
-            # them. This releases the published 8081 host port from old revisions.
-            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env down --remove-orphans
-            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env pull crypdog
-            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build crypdog
-            docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps
+            COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env"
+            # Validate interpolation with the production .env before touching
+            # the running service. The .env file is deliberately kept on the
+            # host and is never copied into the repository or image.
+            $COMPOSE config --quiet
+            $COMPOSE pull crypdog
+            # --force-recreate is required when .env values change: a plain
+            # restart reuses the old container environment and does not reload
+            # interpolated variables.
+            $COMPOSE up -d --no-build --force-recreate --remove-orphans crypdog
+            $COMPOSE ps
+            CONTAINER_ID="$($COMPOSE ps -q crypdog)"
+            test -n "$CONTAINER_ID"
+            test "$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID")" = "$IMAGE" || {
+              echo 'crypdog container was not recreated with the requested image'
+              $COMPOSE ps -a
+              exit 1
+            }
             # The service runs AutoMigrate before opening HTTP (PostgreSQL can
             # take several seconds on a cold start). Retry connection refused
             # as well as HTTP-level transient failures during that window.
