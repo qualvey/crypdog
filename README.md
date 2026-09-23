@@ -235,7 +235,7 @@ go run ./cmd/server
 
 ### 3. Docker 部署
 ```bash
-docker compose --env-file .env.production up -d
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build
 ```
 
 完整的生产部署、配置、备份、监控和安全要求请参阅 [生产部署文档](doc/deployment/production.md) 或使用 MkDocs 本地预览：

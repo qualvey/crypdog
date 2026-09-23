@@ -152,7 +152,10 @@ jobs:
             docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env pull crypdog
             docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build crypdog
             docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps
-            if ! curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8081/healthz/ready; then
+            # The service runs AutoMigrate before opening HTTP (PostgreSQL can
+            # take several seconds on a cold start). Retry connection refused
+            # as well as HTTP-level transient failures during that window.
+            if ! curl --fail --retry 10 --retry-delay 3 --retry-connrefused --connect-timeout 5 http://127.0.0.1:8081/healthz/ready; then
               echo '=== crypdog container status ==='
               docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps -a
               echo '=== crypdog startup logs ==='

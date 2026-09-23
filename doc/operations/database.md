@@ -9,7 +9,7 @@ Compose 使用 `pgdata` volume 持久化 PostgreSQL 数据。删除 volume 会�
 ## 备份
 
 ```bash
-docker compose --env-file .env.production exec -T postgres \
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env exec -T postgres \
   pg_dump -U crypdog -d crypdog --format=custom > crypdog-$(date +%Y%m%d-%H%M%S).dump
 ```
 
@@ -20,10 +20,10 @@ docker compose --env-file .env.production exec -T postgres \
 先停止应用写入，再恢复数据库：
 
 ```bash
-docker compose --env-file .env.production stop crypdog
-cat crypdog-backup.dump | docker compose --env-file .env.production exec -T postgres \
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env stop crypdog
+cat crypdog-backup.dump | docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env exec -T postgres \
   pg_restore -U crypdog -d crypdog --clean --if-exists
-docker compose --env-file .env.production start crypdog
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env start crypdog
 ```
 
 恢复后检查 `/healthz/ready`、订单状态和 Webhook 投递记录。

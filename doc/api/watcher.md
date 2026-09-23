@@ -7,7 +7,7 @@
 ## 1. 通用规范与鉴权
 
 - **基础路径**：`/api/v1/watcher`
-- **传输协议**：HTTP / HTTPS
+- **传输协议**：开发环境支持 HTTP / HTTPS；生产环境的 `webhookUrl` 必须使用 HTTPS
 - **数据格式**：`application/json; charset=utf-8`
 - **API 鉴权**：
   所有接口需在请求头携带 Bearer 令牌：

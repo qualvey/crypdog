@@ -3,8 +3,8 @@
 ## 容器无法启动
 
 ```bash
-docker compose --env-file .env.production ps
-docker compose --env-file .env.production logs --tail=200 crypdog
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env logs --tail=200 crypdog
 ```
 
 优先检查：

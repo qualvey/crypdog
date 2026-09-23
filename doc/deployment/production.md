@@ -83,10 +83,12 @@ pprof:
 ## 5. 启动和验证
 
 ```bash
-docker compose --env-file .env.production build
-docker compose --env-file .env.production up -d
-docker compose ps
-docker compose logs --tail=100 crypdog
+printf 'CRYPDOG_IMAGE=ghcr.io/qualvey/crypdog:sha-<commit-sha>\n' > .release.env
+chmod 600 .release.env
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env pull crypdog
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build crypdog
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env ps
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env logs --tail=100 crypdog
 ```
 
 健康检查：
@@ -119,9 +121,9 @@ curl -H "Authorization: Bearer <CRYPDOG_METRICS_SECRET>" \
 升级前先备份数据库，然后拉取目标版本并重新构建：
 
 ```bash
-docker compose --env-file .env.production exec -T postgres \
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env exec -T postgres \
   pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > backup.sql
-docker compose --env-file .env.production up -d --build
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env up -d --no-build
 ```
 
 若新版本异常，切换回已验证的镜像或 Git 版本，恢复数据库备份，并检查 Webhook 重试日志是否需要补偿。
