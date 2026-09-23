@@ -87,7 +87,7 @@ func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.ChainNodeConfig) 
 		chain:          Chain,
 		db:             db,
 		cfg:            cfg,
-		client:         *NewEvmRPCClient(cfg.RPCURL, cfg.BackupRPCURLs...),
+		client:         *NewEvmRPCClientWithAPIKey(cfg.RPCURL, cfg.APIKey, cfg.BackupRPCURLs...),
 		wallets:        make(map[string]struct{}),
 		tokens:         make(map[string]model.TokenSpec),
 		blockTimeCache: make(map[uint64]int64),

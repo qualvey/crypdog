@@ -18,11 +18,23 @@ import (
 
 type EvmRPCClient struct {
 	rpcURLs      []string
+	apiKey       string
 	currentIndex atomic.Uint32
 	client       *http.Client
 }
 
 func NewEvmRPCClient(primaryURL string, backupURLs ...string) *EvmRPCClient {
+	return newEvmRPCClient(primaryURL, "", backupURLs...)
+}
+
+// NewEvmRPCClientWithAPIKey 创建带认证信息的 EVM RPC 客户端。
+// 不同 RPC 服务商的认证方式不同：支持在 URL 中使用 {API_KEY} 占位符，
+// 同时为使用 Header 鉴权的节点发送 Bearer 和 X-API-Key。
+func NewEvmRPCClientWithAPIKey(primaryURL, apiKey string, backupURLs ...string) *EvmRPCClient {
+	return newEvmRPCClient(primaryURL, apiKey, backupURLs...)
+}
+
+func newEvmRPCClient(primaryURL, apiKey string, backupURLs ...string) *EvmRPCClient {
 	urls := make([]string, 0, 1+len(backupURLs))
 	if u := strings.TrimSpace(primaryURL); u != "" {
 		urls = append(urls, u)
@@ -40,6 +52,7 @@ func NewEvmRPCClient(primaryURL string, backupURLs ...string) *EvmRPCClient {
 	}
 	return &EvmRPCClient{
 		rpcURLs: urls,
+		apiKey:  strings.TrimSpace(apiKey),
 		client: &http.Client{
 			Timeout: 12 * time.Second,
 		},
@@ -274,12 +287,20 @@ func (c *EvmRPCClient) doRPC(ctx context.Context, body rpcRequest) (json.RawMess
 }
 
 func (c *EvmRPCClient) doSingleRPC(ctx context.Context, nodeURL string, jsonBytes []byte) (json.RawMessage, error) {
+	if c.apiKey != "" {
+		nodeURL = strings.ReplaceAll(nodeURL, "{API_KEY}", c.apiKey)
+	}
 	// 1. 使用 bytes.NewReader，避免内存额外拷贝
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nodeURL, bytes.NewReader(jsonBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create http request failed: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		// 兼容要求 Header 鉴权的 RPC 服务；URL 已包含 key 的服务会忽略这些额外 Header。
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
 	req.Header.Set("User-Agent", "CrypDog/1.0")
 
 	resp, err := c.client.Do(req)
