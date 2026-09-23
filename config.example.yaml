@@ -20,10 +20,12 @@ database:
 
 log:
   level: "info"       # "debug" | "info" | "warn" | "error"
-  format: "text"      # "text" 或 "json"
+  format: "json"      # "text" 或 "json"；生产环境推荐 json
   output: "stdout"    # "stdout" 或 "file"
   file_path: ""       # 日志落盘路径
   timestamp: true      # 文本日志是否输出时间戳
+  max_size_mb: 100     # 单个日志文件最大大小，超过后轮转
+  max_backups: 7       # 保留的历史日志文件数量
 
 metrics:
   enabled: true

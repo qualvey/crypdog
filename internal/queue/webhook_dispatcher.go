@@ -129,7 +129,7 @@ func (w *WebhookDispatcher) StartRetryWorker(ctx context.Context, interval time.
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Println("[WebhookRetryWorker] 收到退出信号，停止补偿重试")
+			logger.Info("webhook retry worker stopped")
 			return
 		case <-ticker.C:
 			w.retryPendingLogs(ctx)
@@ -140,7 +140,7 @@ func (w *WebhookDispatcher) StartRetryWorker(ctx context.Context, interval time.
 func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("[WebhookRetryWorker PANIC RECOVER]: %v", r)
+			logger.Error("panic in webhook retry worker", "error", r)
 		}
 	}()
 
@@ -184,7 +184,7 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 			continue // 已被并发消费，跳过
 		}
 
-		logger.Printf("[WebhookRetryWorker] 🔄 单通道持久化调度重试: OrderID=%s, Event=%s, NextAttempt=%d", l.OrderID, event, l.Attempt+1)
+		logger.Info("retrying webhook delivery", "order_id", l.OrderID, "event", event, "attempt", l.Attempt+1)
 		w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, l.Attempt+1)
 	}
 }
@@ -223,13 +223,13 @@ func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash st
 func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload WebhookPayload, attempt int) {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		logger.Printf("[Webhook] Marshal error for order %s: %v", orderID, err)
+		logger.Error("marshal webhook payload failed", "order_id", orderID, "error", err)
 		return
 	}
 	allowLocal := w.cfg != nil && w.cfg.Webhook.AllowLocal
 	requireHTTPS := w.cfg != nil && (strings.EqualFold(w.cfg.Env, "production") || strings.EqualFold(w.cfg.Env, "prod"))
 	if err := signature.ValidateWebhookURL(webhookURL, allowLocal, requireHTTPS); err != nil {
-		logger.Printf("[Webhook] 拒绝不安全的回调地址 Order=%s: %v", orderID, err)
+		logger.Warn("webhook target rejected", "order_id", orderID, "error", err)
 		return
 	}
 
@@ -237,7 +237,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		logger.Printf("[Webhook] Failed to create request for order %s: %v", orderID, err)
+		logger.Error("create webhook request failed", "order_id", orderID, "error", err)
 		return
 	}
 
@@ -245,7 +245,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	req.Header.Set("X-Signature-SHA256", sig)
 	req.Header.Set("User-Agent", "CrypDog-Webhook-Guardian/1.0")
 
-	logger.Printf("[Webhook] Sending notification to %s (Order: %s, Event: %s, Attempt: %d)", webhookURL, orderID, payload.Event, attempt)
+	logger.Info("sending webhook notification", "order_id", orderID, "event", payload.Event, "attempt", attempt, "target_host", webhookURL)
 
 	startTime := time.Now()
 	resp, err := w.client.Do(req)
@@ -287,19 +287,18 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 
 	if success {
 		metrics.RecordWebhookDispatch("success", durationSec)
-		logger.Printf("[Webhook] Successfully delivered webhook for Order: %s", orderID)
+		logger.Info("webhook delivered", "order_id", orderID, "event", payload.Event, "attempt", attempt)
 		return
 	}
 
-	logger.Printf("[Webhook] Delivery failed for Order: %s (Status: %d, Attempt: %d)", orderID, webhookLog.StatusCode, attempt)
+	logger.Warn("webhook delivery failed", "order_id", orderID, "status", webhookLog.StatusCode, "attempt", attempt, "error", err)
 
 	// 重试彻底收拢至 StartRetryWorker 单一持久化队列驱动，严禁在此启动 time.AfterFunc 导致双重触发
 	if attempt < w.maxAttempts() {
 		metrics.RecordWebhookDispatch("retry", durationSec)
-		logger.Printf("[Webhook] 订单 %s 投递失败，下一次重试将在 %v 后由持久化 Worker 统一驱动 (Attempt: %d)",
-			orderID, nextDelay, attempt+1)
+		logger.Info("webhook delivery scheduled for retry", "order_id", orderID, "delay", nextDelay, "attempt", attempt+1)
 	} else {
 		metrics.RecordWebhookDispatch("max_retried", durationSec)
-		logger.Printf("[Webhook] Exceeded max retries for Order: %s", orderID)
+		logger.Error("webhook delivery exceeded max retries", "order_id", orderID, "attempt", attempt)
 	}
 }

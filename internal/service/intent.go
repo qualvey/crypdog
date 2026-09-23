@@ -71,7 +71,7 @@ func (s *IntentService) RegisterOrReactivate(dto RegisterDTO) (*model.PaymentInt
 	if err == nil {
 		switch existing.Status {
 		case model.StatusPaid:
-			logger.Info("paid %s", dto.OrderID)
+			logger.Info("payment intent paid", "order_id", dto.OrderID)
 			return nil, false, ErrOrderAlreadyPaid
 
 		case model.StatusWatching, model.StatusConfirming:
@@ -312,6 +312,6 @@ func (s *IntentService) CancelIntent(idOrOrderID string) (*model.PaymentIntent, 
 	}
 
 	metrics.RecordIntentStatus(string(intent.Chain), string(intent.Token), string(model.StatusCancelled))
-	logger.Info("[IntentService] 成功取消支付意向: OrderID=%s, IntentID=%s", intent.OrderID, intent.ID)
+	logger.Info("payment intent cancelled", "order_id", intent.OrderID, "intent_id", intent.ID)
 	return &intent, nil
 }

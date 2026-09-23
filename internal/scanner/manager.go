@@ -63,14 +63,14 @@ func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) error {
 	for chain, nodeCfg := range cfg.Chains {
 		// 显式禁用的链可以安全跳过；显式启用但配置不完整必须阻止启动。
 		if nodeCfg.Enabled != nil && !*nodeCfg.Enabled {
-			logger.Printf("[Init] 跳过链扫描器: %s (已禁用)", chain)
+			logger.Info("chain scanner disabled", "chain", chain)
 			continue
 		}
 		if strings.TrimSpace(nodeCfg.RPCURL) == "" {
 			if nodeCfg.Enabled != nil && *nodeCfg.Enabled {
 				return fmt.Errorf("链 %s 已启用但未配置 RPC URL", chain)
 			}
-			logger.Printf("[Init] 跳过链扫描器: %s (未配置 RPC)", chain)
+			logger.Warn("chain scanner skipped because RPC is not configured", "chain", chain)
 			continue
 		}
 		// 根据 Driver 查找对应的构造器，未配置时自动根据链类型推断默认驱动
@@ -87,7 +87,7 @@ func (m *Manager) RegisterFromConfig(cfg *config.Config, db *gorm.DB) error {
 			return fmt.Errorf("初始化链 %s 扫描器失败: %w", chain, err)
 		}
 		m.Register(scanner)
-		logger.Printf("[Init] 成功装载链扫描器: %s [%s] (%s)", chain, driver, nodeCfg.RPCURL)
+		logger.Info("chain scanner loaded", "chain", chain, "driver", driver)
 	}
 	return nil
 }
@@ -117,9 +117,9 @@ func (m *Manager) StartAll(ctx context.Context, out chan<- model.ChainTransfer) 
 		scannerName := name
 
 		go func() {
-			logger.Printf("[Scanner] 正在拉起扫描引擎: %s", scannerName)
+			logger.Info("starting chain scanner", "scanner", scannerName)
 			if err := scannerInstance.Start(ctx, out); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Printf("[Scanner Error] 扫描器 %s 异常退出: %v", scannerName, err)
+				logger.Error("chain scanner stopped unexpectedly", "scanner", scannerName, "error", err)
 			}
 		}()
 	}

@@ -36,7 +36,7 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | `webhook.webhook_secret` | `CRYPDOG_WEBHOOK_SECRET` | 开发默认值 | Webhook 签名使用的 HMAC-SHA256 共享秘钥；生产必须使用随机值 |
 | `webhook.max_retries` | - | `3` | 回调失败时的最大重试次数 |
 | `webhook.timeout_sec` | - | `5` | 单次回调商户接口的 HTTP 超时时间（秒） |
-| `webhook.allow_local` | `WEBHOOK_ALLOW_LOCAL` | `false` | 是否允许回调本地回环地址（`localhost` / `127.0.0.1`）。本地联调设为 `true`，**生产环境必须为 false 以严格防御 SSRF 攻击** |
+| `webhook.allow_local` | `WEBHOOK_ALLOW_LOCAL` | `false` | 是否允许回调本地回环地址（`localhost` / `127.0.0.1`）。本地联调设为 `true`，**生产环境必须为 false 以严格防御 SSRF 攻击**；生产环境的 `webhookUrl` 还必须使用 HTTPS |
 
 ---
 
@@ -54,10 +54,12 @@ CrypDog 遵循 **The Twelve-Factor App** 配置设计准则，支持以 YAML 文
 | YAML 路径 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `log.level` | `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
-| `log.format` | `LOG_FORMAT` | `text` | 日志格式：开发环境用 `text`，生产容器环境推荐 `json` |
+| `log.format` | `LOG_FORMAT` | `json` | 日志格式：开发环境可用 `text`，生产容器环境使用 `json` |
 | `log.output` | `LOG_OUTPUT` | `stdout` | 输出目标：`stdout` 或 `file` |
 | `log.file_path` | `LOG_FILE_PATH` | `""` | 当 output 为 file 时的磁盘写入路径 |
-| `log.timestamp` | `LOG_TIMESTAMP` | `true` | 文本日志是否输出 ISO-8601 时间戳；设为 `false` 可使用无时间戳的简洁格式 |
+| `log.timestamp` | `LOG_TIMESTAMP` | `true` | 文本日志是否输出时区、日期和时间；设为 `false` 可使用无时间戳的简洁格式 |
+| `log.max_size_mb` | `LOG_MAX_SIZE_MB` | `100` | 日志文件达到该大小后轮转 |
+| `log.max_backups` | `LOG_MAX_BACKUPS` | `7` | 日志轮转后保留的历史文件数量 |
 | `metrics.enabled` | `METRICS_ENABLED` | `true` | 是否暴露 Prometheus 监控指标端点 |
 | `metrics.path` | `METRICS_PATH` | `/metrics` | 指标拉取路径 |
 | `metrics.secret` | `CRYPDOG_METRICS_SECRET` | 空 | 指标端点独立 Bearer 秘钥，生产环境启用 Metrics 时必须配置 |

@@ -33,15 +33,15 @@ func InitDB(cfg *config.Config) *gorm.DB {
 			}
 			dsn = fmt.Sprintf("%s%s_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", dsn, delimiter)
 		}
-		logger.Println("⚠️ [Database Notice] 当前使用 SQLite。生产环境或多副本集群部署建议切换为 PostgreSQL。已自动配置 WAL 模式与 5s 忙等待防锁。")
+		logger.Warn("SQLite database in use; PostgreSQL is recommended for production or multi-replica deployments", "driver", cfg.Database.Driver)
 		DB, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	}
 
 	if err != nil {
-		logger.Fatalf("Failed to connect to database (%s): %v", cfg.Database.Driver, err)
+		logger.Fatal("database connection failed", "driver", cfg.Database.Driver, "error", err)
 	}
 
-	logger.Printf("Successfully connected to database (%s)", cfg.Database.Driver)
+	logger.Info("database connected", "driver", cfg.Database.Driver)
 
 	// Auto migrate tables
 	err = DB.AutoMigrate(
@@ -54,10 +54,10 @@ func InitDB(cfg *config.Config) *gorm.DB {
 		&model.ChainToken{},
 	)
 	if err != nil {
-		logger.Fatalf("Failed to auto-migrate database schema: %v", err)
+		logger.Fatal("database migration failed", "error", err)
 	}
 
-	logger.Println("Database auto-migration completed successfully")
+	logger.Info("database migration completed")
 
 	// 播种初始默认代币与收款钱包
 	seedInitialTokens(DB)
@@ -65,7 +65,7 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	sqlDB, err := DB.DB()
 	if err != nil {
-		logger.Fatalf("Failed to get generic database object: %v", err)
+		logger.Fatal("get generic database object failed", "error", err)
 	}
 
 	// 设置最大空闲连接数

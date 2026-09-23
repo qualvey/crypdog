@@ -52,7 +52,7 @@ func (w *ConfirmationWorker) StartWorker(ctx context.Context, interval time.Dura
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Println("[ConfirmationWorker] 收到退出信号，停止确认度检测")
+			logger.Info("confirmation worker stopped")
 			return
 		case <-ticker.C:
 			w.safeCheckConfirmations()
@@ -62,7 +62,7 @@ func (w *ConfirmationWorker) StartWorker(ctx context.Context, interval time.Dura
 func (w *ConfirmationWorker) safeCheckConfirmations() {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("[ConfirmationWorker PANIC RECOVER] 执行确认度检测异常: %v", r)
+			logger.Error("panic in confirmation worker", "error", r)
 		}
 	}()
 
@@ -95,11 +95,11 @@ func (w *ConfirmationWorker) checkConfirmations() {
 				valid, err := w.txVerifier(verifyCtx, intent.Chain, intent.TxHash, intent.BlockNumber)
 				cancel()
 				if err != nil {
-					logger.Printf("[ConfirmationWorker] 验证交易有效性失败(RPC抖动暂不推进): tx=%s, err=%v", intent.TxHash, err)
+					logger.Warn("transaction verification failed; payment remains confirming", "tx_hash", intent.TxHash, "chain", intent.Chain, "error", err)
 					continue
 				}
 				if !valid {
-					logger.Printf("[ConfirmationWorker ALARM] ⚠️ 拦截链上假充值/重组回滚交易: Order=%s, Tx=%s", intent.OrderID, intent.TxHash)
+					logger.Error("reverted or invalid transaction blocked", "order_id", intent.OrderID, "tx_hash", intent.TxHash, "chain", intent.Chain)
 					continue
 				}
 			}
@@ -114,11 +114,11 @@ func (w *ConfirmationWorker) checkConfirmations() {
 					"updated_at":    now,
 				})
 			if res.Error != nil {
-				logger.Printf("[ConfirmationWorker] 更新订单状态失败 Order=%s: %v", intent.OrderID, res.Error)
+				logger.Error("payment status update failed", "order_id", intent.OrderID, "error", res.Error)
 				continue
 			}
 			if res.RowsAffected == 0 {
-				logger.Printf("[ConfirmationWorker Warning] ⚠️ 订单 %s 状态已变更(非CONFIRMING)，放弃推进为 PAID", intent.OrderID)
+				logger.Warn("payment status changed concurrently; refusing paid transition", "order_id", intent.OrderID)
 				continue
 			}
 
@@ -132,15 +132,14 @@ func (w *ConfirmationWorker) checkConfirmations() {
 				Where("chain = ? AND tx_hash = ? AND log_index = ?", intent.Chain, intent.TxHash, intent.LogIndex).
 				Update("matched_order_id", intent.OrderID)
 
-			logger.Printf("[ConfirmationWorker] 🎊 Order CONFIRMED! Order: %s | TxHash: %s | Confirmations: %d/%d",
-				intent.OrderID, intent.TxHash, confirmations, required)
+			logger.Info("payment confirmed", "order_id", intent.OrderID, "tx_hash", intent.TxHash, "confirmations", confirmations, "required_confirmations", required, "chain", intent.Chain)
 
 			// Fetch transfer timestamp if available
 			var transfer model.ChainTransfer
 			var blockTs int64 = now.Unix()
 			if err := w.db.Where("chain = ? AND tx_hash = ? AND log_index = ?", intent.Chain, intent.TxHash, intent.LogIndex).First(&transfer).Error; err != nil {
 				if !errors.Is(err, gorm.ErrRecordNotFound) {
-					logger.Printf("[ConfirmWorker] 查询关联流水失败 tx=%s: %v", intent.TxHash, err)
+					logger.Error("related transfer lookup failed", "tx_hash", intent.TxHash, "error", err)
 				}
 				// 找不到才合理降级为 now
 			} else {
@@ -158,8 +157,7 @@ func (w *ConfirmationWorker) checkConfirmations() {
 					"updated_at":    now,
 				})
 
-			logger.Printf("[ConfirmationWorker] Order %s confirmation updated: %d/%d",
-				intent.OrderID, confirmations, required)
+			logger.Info("payment confirmations updated", "order_id", intent.OrderID, "confirmations", confirmations, "required_confirmations", required, "chain", intent.Chain)
 		}
 	}
 }

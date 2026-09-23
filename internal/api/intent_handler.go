@@ -222,9 +222,10 @@ func (h *IntentHandler) AllocateIntent(c *gin.Context) {
 	}
 
 	logger.InfoContext(c.Request.Context(), "接受到订单意向",
-		"data", responseData,
-		"Chain", req.Chain,
-		"Token", req.Token,
+		"order_id", intent.OrderID,
+		"intent_id", intent.ID,
+		"chain", req.Chain,
+		"token", req.Token,
 		"is_idempotent", isIdempotent,
 	)
 

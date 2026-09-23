@@ -95,32 +95,32 @@ func (a *App) runPipeline(ctx context.Context) {
 	a.wg.Add(1)
 	defer a.wg.Done()
 
-	logger.Println("[Pipeline] 交易处理消费者已就绪")
+	logger.Info("transaction pipeline consumer ready")
 	a.recoverUnmatchedTransfers(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			// 停机阶段：排空 Channel 剩余积压交易，防止丢单
-			logger.Println("[Pipeline] 收到退出信号，开始排空队列...")
+			logger.Info("shutdown signal received; draining transaction queue")
 			for {
 				select {
 				case t, ok := <-a.transferChan:
 					if !ok {
-						logger.Println("[Pipeline] 队列已关闭，消费者退出")
+						logger.Info("transaction queue closed; consumer stopped")
 						return
 					}
 					a.safeProcess(t)
 				default:
 					// 缓冲区当前已无积压数据，正常退出
-					logger.Println("[Pipeline] 队列积压消费完毕，消费者安全退出")
+					logger.Info("transaction queue drained; consumer stopped")
 					return
 				}
 			}
 
 		case transfer, ok := <-a.transferChan:
 			if !ok {
-				logger.Println("[Pipeline] Channel 关闭，消费者退出")
+				logger.Info("transaction channel closed; consumer stopped")
 				return
 			}
 			metrics.SetPipelineQueueLength(len(a.transferChan))
@@ -145,7 +145,7 @@ func (a *App) recoverUnmatchedTransfers(ctx context.Context) {
 		return
 	}
 
-	logger.Printf("[Pipeline Recovery] 发现 %d 笔历史未撮合流水，开始自动重试撮合...", len(unmatched))
+	logger.Info("retrying unmatched historical transfers", "count", len(unmatched))
 	for _, tr := range unmatched {
 		a.safeReprocess(tr)
 	}
@@ -154,7 +154,7 @@ func (a *App) recoverUnmatchedTransfers(ctx context.Context) {
 func (a *App) safeReprocess(t model.ChainTransfer) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("[PANIC RECOVER] 重试撮合历史转账失败: %v, 数据: %+v", r, t)
+			logger.Error("panic while retrying historical transfer", "error", r, "chain", t.Chain, "tx_hash", t.TxHash)
 		}
 	}()
 
@@ -163,14 +163,14 @@ func (a *App) safeReprocess(t model.ChainTransfer) {
 		currentBlock = t.BlockNumber
 	}
 	if err := a.matcher.ReprocessUnmatchedTransfer(t, currentBlock); err != nil {
-		logger.Printf("[Matcher Recovery] 重试撮合历史转账失败: %v, Tx=%s", err, t.TxHash)
+		logger.Error("retrying historical transfer failed", "error", err, "chain", t.Chain, "tx_hash", t.TxHash)
 	}
 }
 
 func (a *App) safeProcess(t model.ChainTransfer) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("[PANIC RECOVER] 处理转账失败: %v, 数据: %+v", r, t)
+			logger.Error("panic while processing transfer", "error", r, "chain", t.Chain, "tx_hash", t.TxHash)
 		}
 	}()
 
@@ -179,7 +179,7 @@ func (a *App) safeProcess(t model.ChainTransfer) {
 		currentBlock = t.BlockNumber
 	}
 	if err := a.matcher.ProcessTransfer(t, currentBlock); err != nil {
-		logger.Printf("[Matcher] 处理转账失败: %v, Tx=%s", err, t.TxHash)
+		logger.Error("processing transfer failed", "error", err, "chain", t.Chain, "tx_hash", t.TxHash)
 	}
 }
 
@@ -200,9 +200,9 @@ func (a *App) startHTTP() error {
 	}
 
 	go func() {
-		logger.Printf("🚀 CrypDog running on HTTP :%s", a.cfg.Server.Port)
+		logger.Info("HTTP server started", "port", a.cfg.Server.Port)
 		if err := a.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatalf("HTTP 服务异常退出: %v", err)
+			logger.Fatal("HTTP server stopped unexpectedly", "error", err)
 		}
 	}()
 	return nil
@@ -216,16 +216,16 @@ func (a *App) waitForShutdown(ctx context.Context) error {
 
 	// 阻塞在此处，直到外界发来停止信号
 	sig := <-quit
-	logger.Printf("接收到系统信号 [%v]，正在执行平滑退出...", sig)
+	logger.Info("shutdown signal received", "signal", sig.String())
 
 	// 2. 优先关闭 HTTP 服务（设置 8s 超时），拒接新的外部请求
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer shutdownCancel()
 	if a.srv != nil {
 		if err := a.srv.Shutdown(shutdownCtx); err != nil {
-			logger.Printf("[HTTP] 停机超时或出错: %v", err)
+			logger.Error("HTTP graceful shutdown failed", "error", err)
 		} else {
-			logger.Println("[HTTP] 服务已优雅停止")
+			logger.Info("HTTP server stopped gracefully")
 		}
 	}
 
@@ -237,6 +237,6 @@ func (a *App) waitForShutdown(ctx context.Context) error {
 	// 4. 阻塞等待所有已纳管的后台 Goroutine（如 Pipeline 排空）彻底收尾
 	a.wg.Wait()
 
-	logger.Println("🐕 CrypDog 已安全平稳停止")
+	logger.Info("CrypDog stopped gracefully")
 	return nil
 }

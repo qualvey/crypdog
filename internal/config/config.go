@@ -77,11 +77,13 @@ type MonitorConfig struct {
 
 // LogConfig 日志配置
 type LogConfig struct {
-	Level     string `yaml:"level" env:"LOG_LEVEL" env-default:"info"`
-	Format    string `yaml:"format" env:"LOG_FORMAT" env-default:"text"`   // text 或 json
-	Output    string `yaml:"output" env:"LOG_OUTPUT" env-default:"stdout"` // stdout 或 file
-	FilePath  string `yaml:"file_path" env:"LOG_FILE_PATH"`                // 文件路径，如 logs/crypdog.log
-	Timestamp bool   `yaml:"timestamp" env:"LOG_TIMESTAMP" env-default:"true"`
+	Level      string `yaml:"level" env:"LOG_LEVEL" env-default:"info"`
+	Format     string `yaml:"format" env:"LOG_FORMAT" env-default:"json"`   // text 或 json，生产环境默认 json
+	Output     string `yaml:"output" env:"LOG_OUTPUT" env-default:"stdout"` // stdout 或 file
+	FilePath   string `yaml:"file_path" env:"LOG_FILE_PATH"`                // 文件路径，如 logs/crypdog.log
+	Timestamp  bool   `yaml:"timestamp" env:"LOG_TIMESTAMP" env-default:"true"`
+	MaxSizeMB  int    `yaml:"max_size_mb" env:"LOG_MAX_SIZE_MB" env-default:"100"`
+	MaxBackups int    `yaml:"max_backups" env:"LOG_MAX_BACKUPS" env-default:"7"`
 }
 
 // MetricsConfig 指标暴露配置

@@ -153,7 +153,7 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 	if interval <= 0 {
 		interval = 3 * time.Second // 兜底安全默认值
 	}
-	logger.Printf("[TronScanner] Started TRON blockchain scanner daemon (Interval: %ds)", interval)
+	logger.Info("TRON scanner started", "chain", model.ChainTron, "interval", interval)
 
 	for {
 		select {
@@ -164,7 +164,7 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 		t.scanOnce(ctx, transferChan)
 		select {
 		case <-ctx.Done():
-			logger.Printf("[TronScanner] Scanner stopped gracefully")
+			logger.Info("TRON scanner stopped", "chain", model.ChainTron)
 			return ctx.Err()
 		case <-time.After(interval):
 		}
@@ -301,7 +301,7 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		logger.Printf("[TronScanner] ⚠️ 触发 TronGrid API 限流 (429 Too Many Requests)，本周期等待退避")
+		logger.Warn("TronGrid API rate limited; backing off", "chain", model.ChainTron, "status", http.StatusTooManyRequests)
 		metrics.RecordScanError(string(model.ChainTron), "rate_limit")
 		return
 	}
@@ -333,8 +333,7 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		spec, isKnown := t.tokens[contractAddr]
 		t.tokensMu.RUnlock()
 		if !isKnown {
-			logger.Printf("[TronScanner Security] 拦截非白名单或伪造代币: Contract=%s, FakeSymbol=%s, Tx=%s, To=%s",
-				contractAddr, tx.TokenInfo.Symbol, tx.TransactionID, tx.To)
+			logger.Error("non-whitelisted or counterfeit token blocked", "chain", model.ChainTron, "contract", contractAddr, "token", tx.TokenInfo.Symbol, "tx_hash", tx.TransactionID, "target_address", tx.To)
 			continue
 		}
 
@@ -463,8 +462,7 @@ func (t *TronScanner) SimulateTransfer(ctx context.Context, toAddress string, am
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case transferChan <- transfer:
-		logger.Printf("[TronScanner] [MOCK] 已模拟充值事件: TxHash=%s, To=%s, Amount=%s %s",
-			txHash, target, amount.StringFixed(4), token)
+		logger.Info("mock chain transfer generated", "chain", model.ChainTron, "tx_hash", txHash, "target_address", target, "amount", amount.StringFixed(4), "token", token)
 		return txHash, nil
 	case <-time.After(3 * time.Second):
 		return "", fmt.Errorf("推送模拟事件超时，transferChan 已满")

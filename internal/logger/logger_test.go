@@ -132,9 +132,8 @@ func TestStructuredLogSchema(t *testing.T) {
 
 	out := buf.String()
 	for _, field := range []string{
-		"[INFO]",
+		"INFO logger:",
 		"webhook target rejected",
-		"[logger logger_test.go:",
 		"request_id=request-123",
 		"error_code=WEBHOOK_TARGET_INVALID",
 	} {
@@ -190,7 +189,7 @@ func TestTextTimestampCanBeDisabled(t *testing.T) {
 
 	Info("timestamp disabled")
 
-	if !strings.HasPrefix(buf.String(), "[INFO]") {
+	if !strings.HasPrefix(buf.String(), "INFO logger:") {
 		t.Fatalf("timestamp should be omitted from text log: %s", buf.String())
 	}
 }

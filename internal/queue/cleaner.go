@@ -26,7 +26,7 @@ func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Println("[IntentCleaner] 收到停止信号，清理守护进程平稳退出")
+			logger.Info("intent cleaner stopped")
 			return
 		case <-ticker.C:
 			c.safeCleanExpiredIntents()
@@ -38,7 +38,7 @@ func (c *IntentCleaner) StartCleaner(ctx context.Context, interval time.Duration
 func (c *IntentCleaner) safeCleanExpiredIntents() {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("[IntentCleaner PANIC RECOVER] 清理任务执行异常: %v", r)
+			logger.Error("panic in intent cleaner", "error", r)
 		}
 	}()
 
@@ -51,11 +51,11 @@ func (c *IntentCleaner) cleanExpiredIntents() {
 		Update("status", model.StatusExpired)
 
 	if res.Error != nil {
-		logger.Printf("[Cleaner] Error cleaning expired intents: %v", res.Error)
+		logger.Error("cleaning expired intents failed", "error", res.Error)
 		return
 	}
 
 	if res.RowsAffected > 0 {
-		logger.Printf("[Cleaner] Automatically expired %d outdated payment intents", res.RowsAffected)
+		logger.Info("expired outdated payment intents", "count", res.RowsAffected)
 	}
 }

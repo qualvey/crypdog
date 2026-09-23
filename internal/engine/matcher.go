@@ -105,22 +105,19 @@ func (e *MatcherEngine) matchAndSettle(transfer *model.ChainTransfer, currentBlo
 		if expErr == nil && len(expiredIntents) > 0 {
 			matchedIntent = e.findMatchedIntent(expiredIntents, transfer.Amount)
 			if matchedIntent != nil {
-				logger.Printf("[Matcher] ⏰ 捕获超时迟到充值订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
-					matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
+				logger.Info("late payment matched to expired intent", "order_id", matchedIntent.OrderID, "intent_id", matchedIntent.ID, "tx_hash", transfer.TxHash, "amount", transfer.Amount.String())
 			}
 		}
 	}
 
 	if matchedIntent == nil {
 		metrics.RecordTransferMatch(string(transfer.Chain), false)
-		logger.Printf("[Matcher] 未找到匹配候选意向: Chain=%s, Token=%s, To=%s, Amount=%s, Tx=%s",
-			transfer.Chain, transfer.Token, transfer.TargetAddress, transfer.Amount.String(), transfer.TxHash)
+		logger.Warn("no matching payment intent found", "chain", transfer.Chain, "token", transfer.Token, "target_address", transfer.TargetAddress, "amount", transfer.Amount.String(), "tx_hash", transfer.TxHash)
 		return nil
 	}
 
 	metrics.RecordTransferMatch(string(transfer.Chain), true)
-	logger.Printf("[Matcher] 🎉 成功匹配订单: OrderID=%s, IntentID=%s, Tx=%s, Amount=%s",
-		matchedIntent.OrderID, matchedIntent.ID, transfer.TxHash, transfer.Amount.String())
+	logger.Info("payment intent matched", "order_id", matchedIntent.OrderID, "intent_id", matchedIntent.ID, "tx_hash", transfer.TxHash, "amount", transfer.Amount.String(), "chain", transfer.Chain)
 
 	// 4. 状态推进与结算（事务 + 触发通知）
 	return e.settle(matchedIntent, transfer, currentBlockNumber)
@@ -180,10 +177,10 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 		valid, err := e.txVerifier(verifyCtx, transfer.Chain, transfer.TxHash, transfer.BlockNumber)
 		cancel()
 		if err != nil {
-			logger.Printf("[Matcher] ⚠️ 快速确认二次核验交易失败(RPC抖动暂不推进为PAID，交由ConfirmationWorker重试): tx=%s, err=%v", transfer.TxHash, err)
+			logger.Warn("transaction verification failed; confirmation worker will retry", "tx_hash", transfer.TxHash, "chain", transfer.Chain, "error", err)
 			isPaid = false
 		} else if !valid {
-			logger.Printf("[Matcher ALARM] 🚨 拦截链上假充值/已Revert交易: Order=%s, Tx=%s, Chain=%s", intent.OrderID, transfer.TxHash, transfer.Chain)
+			logger.Error("invalid or reverted transaction blocked", "order_id", intent.OrderID, "tx_hash", transfer.TxHash, "chain", transfer.Chain)
 			return fmt.Errorf("transaction verification failed: invalid or reverted tx %s", transfer.TxHash)
 		}
 	}

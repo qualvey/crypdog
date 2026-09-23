@@ -237,12 +237,7 @@ func SetupRouter(h *Handler) *gin.Engine {
 
 			// Verify HMAC signature
 			isValid := signature.VerifyHMACSHA256(bodyBytes, h.cfg.Webhook.Secret, sig)
-			logger.Printf("==================================================")
-			logger.Printf("[Mock Webhook Target] Received Webhook Payload!")
-			logger.Printf("Header X-Signature-SHA256: %s", sig)
-			logger.Printf("Payload Body: %s", string(bodyBytes))
-			logger.Printf("HMAC Verification Result: %v (Valid: %t)", sig, isValid)
-			logger.Printf("==================================================")
+			logger.Info("mock webhook received", "signature_present", sig != "", "payload_bytes", len(bodyBytes), "signature_valid", isValid)
 
 			if !isValid {
 				c.JSON(http.StatusUnauthorized, gin.H{

@@ -84,8 +84,83 @@ var (
 	currentTimestamp                = true
 	currentColor                    = false
 	slogLevelVar     *slog.LevelVar = new(slog.LevelVar)
-	logFileHandle    *os.File
+	logFileHandle    io.Closer
 )
+
+const (
+	defaultMaxSizeBytes = int64(100 * 1024 * 1024)
+	defaultMaxBackups   = 7
+)
+
+type rotatingWriter struct {
+	mu         sync.Mutex
+	file       *os.File
+	path       string
+	size       int64
+	maxSize    int64
+	maxBackups int
+}
+
+func newRotatingWriter(path string, maxSizeBytes int64, maxBackups int) (*rotatingWriter, error) {
+	if maxSizeBytes <= 0 {
+		maxSizeBytes = defaultMaxSizeBytes
+	}
+	if maxBackups <= 0 {
+		maxBackups = defaultMaxBackups
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &rotatingWriter{file: f, path: path, size: info.Size(), maxSize: maxSizeBytes, maxBackups: maxBackups}, nil
+}
+
+func (w *rotatingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.size > 0 && w.size+int64(len(p)) > w.maxSize {
+		if err := w.rotateLocked(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := w.file.Write(p)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *rotatingWriter) rotateLocked() error {
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+	for i := w.maxBackups - 1; i >= 1; i-- {
+		oldPath := fmt.Sprintf("%s.%d", w.path, i)
+		newPath := fmt.Sprintf("%s.%d", w.path, i+1)
+		if err := os.Rename(oldPath, newPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := os.Rename(w.path, w.path+".1"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	w.file = f
+	w.size = 0
+	return nil
+}
+
+func (w *rotatingWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Close()
+}
 
 type contextKey string
 
@@ -154,7 +229,6 @@ func (h *textHandler) Handle(_ context.Context, record slog.Record) error {
 	})
 
 	component := "app"
-	source := "unknown:0"
 	var fields []string
 	for _, attr := range attrs {
 		attr.Value = attr.Value.Resolve()
@@ -162,7 +236,8 @@ func (h *textHandler) Handle(_ context.Context, record slog.Record) error {
 		case "component":
 			component = attr.Value.String()
 		case "source":
-			source = attr.Value.String()
+			// Source is retained in JSON logs but omitted from the compact
+			// human-readable format.
 		default:
 			fields = append(fields, formatAttr(attr))
 		}
@@ -174,19 +249,24 @@ func (h *textHandler) Handle(_ context.Context, record slog.Record) error {
 		if stamp.IsZero() {
 			stamp = time.Now()
 		}
-		b.WriteString(stamp.Format(time.RFC3339Nano))
+		// Keep the text format compatible with common daemon logs:
+		//
+		//   +0800 2026-09-24 03:31:25 INFO network: message
+		//
+		// Use the local timezone and omit sub-second precision so the output is
+		// easy to scan and consistent with the operational logs used by the
+		// deployment environment.
+		b.WriteString(stamp.Local().Format("-0700 2006-01-02 15:04:05"))
 		b.WriteByte(' ')
 	}
-	level := "[" + levelName(record.Level) + "]"
+	level := levelName(record.Level)
 	if h.color {
-		level = colorizeLevel(record.Level, level)
+		level = colorizeLevel(record.Level, "["+level+"]")
 	}
 	b.WriteString(level)
-	b.WriteString(" [")
-	b.WriteString(component)
 	b.WriteByte(' ')
-	b.WriteString(source)
-	b.WriteString("] ")
+	b.WriteString(component)
+	b.WriteString(": ")
 	b.WriteString(record.Message)
 	for _, field := range fields {
 		b.WriteByte(' ')
@@ -287,7 +367,7 @@ func init() {
 }
 
 // Init 初始化日志系统（设置日志级别、格式及可选的文件落地）
-func Init(level string, format string, output string, outfile string, timestamp ...bool) {
+func Init(level string, format string, output string, outfile string, timestamp bool, rotation ...int) {
 	SetLevel(level)
 
 	mu.Lock()
@@ -297,8 +377,14 @@ func Init(level string, format string, output string, outfile string, timestamp 
 		currentFormat = strings.ToLower(strings.TrimSpace(format))
 	}
 	currentTimestamp = true
-	if len(timestamp) > 0 {
-		currentTimestamp = timestamp[0]
+	currentTimestamp = timestamp
+	maxSizeBytes := defaultMaxSizeBytes
+	maxBackups := defaultMaxBackups
+	if len(rotation) > 0 && rotation[0] > 0 {
+		maxSizeBytes = int64(rotation[0]) * 1024 * 1024
+	}
+	if len(rotation) > 1 && rotation[1] > 0 {
+		maxBackups = rotation[1]
 	}
 
 	// 清理旧的文件句柄
@@ -310,7 +396,9 @@ func Init(level string, format string, output string, outfile string, timestamp 
 	var writers []io.Writer
 
 	output = strings.ToLower(strings.TrimSpace(output))
-	currentColor = outfile == "" && output != "file"
+	// Keep daemon output byte-stable for journald, files and pipes. Consumers
+	// can still choose colored output at the terminal layer if desired.
+	currentColor = false
 	switch output {
 	case "stdout":
 		writers = append(writers, os.Stdout)
@@ -321,11 +409,13 @@ func Init(level string, format string, output string, outfile string, timestamp 
 	}
 
 	if outfile != "" {
-		if err := os.MkdirAll(filepath.Dir(outfile), 0755); err == nil {
-			if f, err := os.OpenFile(outfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-				logFileHandle = f
-				writers = append(writers, f)
-			}
+		if err := os.MkdirAll(filepath.Dir(outfile), 0755); err != nil {
+			writeInitWarning("create log directory %q failed: %v", filepath.Dir(outfile), err)
+		} else if f, err := newRotatingWriter(outfile, maxSizeBytes, maxBackups); err != nil {
+			writeInitWarning("open log file %q failed: %v", outfile, err)
+		} else {
+			logFileHandle = f
+			writers = append(writers, f)
 		}
 	}
 
@@ -342,6 +432,11 @@ func Init(level string, format string, output string, outfile string, timestamp 
 
 	handler := newSlogHandler(finalWriter, currentFormat, currentTimestamp, currentColor)
 	slog.SetDefault(slog.New(handler))
+}
+
+func writeInitWarning(format string, args ...any) {
+	stamp := time.Now().Local().Format("-0700 2006-01-02 15:04:05")
+	fmt.Fprintf(os.Stderr, "%s WARN logger: %s\n", stamp, fmt.Sprintf(format, args...))
 }
 
 // SetLevel 动态调整日志级别（线程安全，同时同步 slog）
@@ -395,33 +490,46 @@ func logStructured(ctx context.Context, level Level, msg string, args ...any) {
 	slog.Log(ctx, level.SlogLevel(), msg, attrs...)
 }
 
-func Trace(format string, args ...interface{}) {
-	logf(LevelTrace, format, args...)
+func Trace(msg string, args ...any) {
+	if enabled(LevelTrace) {
+		logStructured(context.Background(), LevelTrace, msg, args...)
+	}
 }
 
-func Debug(format string, args ...interface{}) {
-	logf(LevelDebug, format, args...)
+func Debug(msg string, args ...any) {
+	if enabled(LevelDebug) {
+		logStructured(context.Background(), LevelDebug, msg, args...)
+	}
 }
 
-func Info(format string, args ...interface{}) {
-	logf(LevelInfo, format, args...)
+func Info(msg string, args ...any) {
+	if enabled(LevelInfo) {
+		logStructured(context.Background(), LevelInfo, msg, args...)
+	}
 }
 
-func Warn(format string, args ...interface{}) {
-	logf(LevelWarn, format, args...)
+func Warn(msg string, args ...any) {
+	if enabled(LevelWarn) {
+		logStructured(context.Background(), LevelWarn, msg, args...)
+	}
 }
 
-func Error(format string, args ...interface{}) {
-	logf(LevelError, format, args...)
+func Error(msg string, args ...any) {
+	if enabled(LevelError) {
+		logStructured(context.Background(), LevelError, msg, args...)
+	}
 }
 
-func Fatal(format string, args ...interface{}) {
-	logf(LevelError, format, args...)
+func Fatal(msg string, args ...any) {
+	if enabled(LevelError) {
+		logStructured(context.Background(), LevelError, msg, args...)
+	}
 	os.Exit(1)
 }
 
 func Fatalf(format string, args ...interface{}) {
-	Fatal(format, args...)
+	logf(LevelError, format, args...)
+	os.Exit(1)
 }
 
 // InfoContext 输出带 Context (包含 request_id 等字段) 的结构化日志

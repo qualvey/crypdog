@@ -145,7 +145,7 @@ func (m *MicroAmountManager) CheckCollision(
 	}
 
 	if err := query.Find(&activeIntents).Error; err != nil {
-		logger.Info("Expected Amount %v query error: %v", expectedAmount, err)
+		logger.Error("expected amount query failed", "expected_amount", expectedAmount, "error", err)
 		return false, err
 	}
 
