@@ -115,8 +115,8 @@ jobs:
           port: ${{ secrets.SERVER_PORT || 22 }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-           source: docker-compose.prod.yml
-           target: ${{ env.DEPLOY_PATH }}
+          source: docker-compose.prod.yml
+          target: ${{ env.DEPLOY_PATH }}
 
       - name: Pull and restart service
         uses: appleboy/ssh-action@v1.2.2
