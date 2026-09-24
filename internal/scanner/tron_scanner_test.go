@@ -5,6 +5,7 @@ import (
 	"crypdog/internal/config"
 	"crypdog/internal/model"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -92,4 +93,60 @@ func TestTronScanner_RejectFakeUSDTToken(t *testing.T) {
 	assert.Equal(t, model.TokenUSDT, captured.Token)
 	assert.Equal(t, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", captured.Contract)
 	assert.True(t, captured.Amount.Equal(decimal.NewFromInt(100)))
+}
+
+func TestTronScanner_FollowsPagination(t *testing.T) {
+	var requests int
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("fingerprint") == "next-page" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data": []map[string]interface{}{{
+					"transaction_id":  "tx-page-51",
+					"block_timestamp": int64(1700000051000),
+					"block_number":    60000051,
+					"from":            "TFrom",
+					"to":              "TTarget",
+					"value":           "100000000",
+					"token_info": map[string]interface{}{
+						"symbol": "USDT", "address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "decimals": 6,
+					},
+				}},
+			})
+			return
+		}
+
+		data := make([]map[string]interface{}, 50)
+		for i := range data {
+			data[i] = map[string]interface{}{
+				"transaction_id":  fmt.Sprintf("tx-page-%d", i),
+				"block_timestamp": int64(1700000000000 + i*1000),
+				"block_number":    60000000 + i,
+				"from":            "TFrom",
+				"to":              "TTarget",
+				"value":           "100000000",
+				"token_info": map[string]interface{}{
+					"symbol": "USDT", "address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "decimals": 6,
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data":    data,
+			"meta":    map[string]string{"fingerprint": "next-page"},
+		})
+	}))
+	defer mockServer.Close()
+
+	sc, err := NewTronScanner(nil, &config.ChainNodeConfig{RPCURL: mockServer.URL})
+	require.NoError(t, err)
+	transferChan := make(chan model.ChainTransfer, 51)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sc.(*TronScanner).scanSingleAddress(ctx, mockServer.URL, "TTarget", transferChan)
+	assert.Equal(t, 2, requests)
+	assert.Len(t, transferChan, 51)
 }
