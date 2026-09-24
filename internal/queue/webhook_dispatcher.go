@@ -148,8 +148,8 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 	var pendingLogs []model.WebhookLog
 	since := now.Add(-2 * time.Hour)
 	err := w.db.WithContext(ctx).
-		Where("success = ? AND attempt < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ? AND created_at >= ?",
-			false, w.maxAttempts(), now, since).
+		Where("success = ? AND attempt < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ? AND created_at >= ? AND (retry_claimed_at IS NULL OR retry_claimed_at <= ?)",
+			false, w.maxAttempts(), now, since, now.Add(-5*time.Minute)).
 		Order("id ASC").
 		Limit(20).
 		Find(&pendingLogs).Error
@@ -176,10 +176,12 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 			continue
 		}
 
-		// 2. 原子清空 next_retry_at 抢占当前重试任务，防止并发惊群重复投递
+		// Claim with a lease instead of clearing next_retry_at. If the process
+		// crashes after this point, the lease expires and the task is retried.
+		claimedAt := time.Now()
 		res := w.db.Model(&model.WebhookLog{}).
-			Where("id = ? AND next_retry_at IS NOT NULL", l.ID).
-			Update("next_retry_at", nil)
+			Where("id = ? AND next_retry_at IS NOT NULL AND (retry_claimed_at IS NULL OR retry_claimed_at <= ?)", l.ID, now.Add(-5*time.Minute)).
+			Update("retry_claimed_at", claimedAt)
 		if res.RowsAffected == 0 {
 			continue // 已被并发消费，跳过
 		}
