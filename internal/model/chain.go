@@ -79,17 +79,18 @@ type CryptoPaymentOptions struct {
 type ChainDisplayMeta struct {
 	Name  string
 	Badge string
+	Order int
 }
 
 // GetChainDisplayMeta returns the default presentation metadata for a chain.
 func GetChainDisplayMeta(chain Chain) ChainDisplayMeta {
 	meta := map[Chain]ChainDisplayMeta{
-		ChainTron:     {Name: "TRC20 (Tron)", Badge: "低手续费 / 推荐"},
-		ChainArbitrum: {Name: "Arbitrum One (L2)", Badge: "极速 / 低Gas"},
-		ChainBsc:      {Name: "BNB Smart Chain", Badge: "高吞吐"},
-		ChainEth:      {Name: "ERC20 (Ethereum)", Badge: "主网原生"},
-		ChainPolygon:  {Name: "Polygon (Matic)", Badge: "低费率"},
-		ChainSolana:   {Name: "Solana", Badge: "极速"},
+		ChainTron:     {Name: "TRC20 (Tron)", Badge: "低手续费 / 推荐", Order: 10},
+		ChainArbitrum: {Name: "Arbitrum One (L2)", Badge: "极速 / 低Gas", Order: 20},
+		ChainBsc:      {Name: "BNB Smart Chain", Badge: "高吞吐", Order: 30},
+		ChainEth:      {Name: "ERC20 (Ethereum)", Badge: "主网原生", Order: 40},
+		ChainPolygon:  {Name: "Polygon (Matic)", Badge: "低费率", Order: 50},
+		ChainSolana:   {Name: "Solana", Badge: "极速", Order: 60},
 	}
 	return meta[NormalizeChain(string(chain))]
 }

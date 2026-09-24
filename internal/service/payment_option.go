@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 
 	"crypdog/internal/config"
 	"crypdog/internal/model"
@@ -140,6 +141,26 @@ func buildPaymentOptions(availableChains map[string]bool, dbTokens []model.Chain
 			seenTokens[symbol] = true
 			options.Tokens = append(options.Tokens, paymentTokenOption(token))
 		}
+	}
+
+	// Each token must expose chains in the same canonical order. The database
+	// order is token-oriented (priority/id), so it cannot be used directly here.
+	for symbol := range options.Chains {
+		sort.SliceStable(options.Chains[symbol], func(i, j int) bool {
+			left := model.GetChainDisplayMeta(options.Chains[symbol][i].Chain)
+			right := model.GetChainDisplayMeta(options.Chains[symbol][j].Chain)
+			leftOrder, rightOrder := left.Order, right.Order
+			if leftOrder == 0 {
+				leftOrder = int(^uint(0) >> 1)
+			}
+			if rightOrder == 0 {
+				rightOrder = int(^uint(0) >> 1)
+			}
+			if leftOrder != rightOrder {
+				return leftOrder < rightOrder
+			}
+			return options.Chains[symbol][i].Chain < options.Chains[symbol][j].Chain
+		})
 	}
 
 	setDefaultPaymentOption(&options)
