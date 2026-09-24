@@ -92,7 +92,8 @@ func SetupRouter(h *Handler) *gin.Engine {
 		c.Next()
 	})
 	intentService := service.NewIntentService(h.db, h.poolManager)
-	intentHandler := NewIntentHandler(h, intentService)
+	paymentOptionService := service.NewPaymentOptionService(h.db, h.cfg, h.scannerMgr)
+	intentHandler := NewIntentHandler(h, intentService, paymentOptionService)
 	transferHandler := NewTransferHandler(h.db)
 
 	// Health Check Endpoints (存活探针与深度就绪探针)

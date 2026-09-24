@@ -74,3 +74,22 @@ type CryptoPaymentOptions struct {
 	DefaultToken string                         `json:"defaultToken"`
 	DefaultChain string                         `json:"defaultChain"`
 }
+
+// ChainDisplayMeta contains the default presentation metadata for a chain.
+type ChainDisplayMeta struct {
+	Name  string
+	Badge string
+}
+
+// GetChainDisplayMeta returns the default presentation metadata for a chain.
+func GetChainDisplayMeta(chain Chain) ChainDisplayMeta {
+	meta := map[Chain]ChainDisplayMeta{
+		ChainTron:     {Name: "TRC20 (Tron)", Badge: "低手续费 / 推荐"},
+		ChainArbitrum: {Name: "Arbitrum One (L2)", Badge: "极速 / 低Gas"},
+		ChainBsc:      {Name: "BNB Smart Chain", Badge: "高吞吐"},
+		ChainEth:      {Name: "ERC20 (Ethereum)", Badge: "主网原生"},
+		ChainPolygon:  {Name: "Polygon (Matic)", Badge: "低费率"},
+		ChainSolana:   {Name: "Solana", Badge: "极速"},
+	}
+	return meta[NormalizeChain(string(chain))]
+}

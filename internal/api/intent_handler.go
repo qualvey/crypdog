@@ -18,7 +18,8 @@ import (
 
 type IntentHandler struct {
 	*Handler
-	intentService *service.IntentService
+	intentService        *service.IntentService
+	paymentOptionService *service.PaymentOptionService
 }
 
 type AllocateIntentReq struct {
@@ -30,10 +31,11 @@ type AllocateIntentReq struct {
 	WebhookURL     string          `json:"webhookUrl" binding:"required"`
 }
 
-func NewIntentHandler(h *Handler, i *service.IntentService) *IntentHandler {
+func NewIntentHandler(h *Handler, i *service.IntentService, p *service.PaymentOptionService) *IntentHandler {
 	return &IntentHandler{
-		h,
-		i,
+		Handler:              h,
+		intentService:        i,
+		paymentOptionService: p,
 	}
 }
 
@@ -314,6 +316,13 @@ func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
 	if latestBlock == 0 {
 		latestBlock = 10000000
 	}
+	// 模拟流水不经过真实节点，因此不能等待链上新区块推进确认数。
+	// 让模拟交易落在“已满足确认数”的历史区块上，确保本地测试可以完整走通
+	// WATCHING -> CONFIRMING/PAID 以及 Webhook 派发链路。
+	requiredConfirmations := h.cfg.GetRequiredConfirmations(chain)
+	if requiredConfirmations > 0 && latestBlock >= requiredConfirmations {
+		latestBlock -= requiredConfirmations - 1
+	}
 
 	transfer := model.ChainTransfer{
 		TxHash:         txHash,
@@ -410,143 +419,10 @@ func (h *IntentHandler) CancelIntent(c *gin.Context) {
 
 // GetPaymentOptions 根据当前启用的公链配置与可用收款地址池，动态产出可供前端展示的 Tokens 与 Chains
 func (h *IntentHandler) GetPaymentOptions(c *gin.Context) {
-	// 1. 查询数据库中启用的收款地址
-	var wallets []model.WalletAddress
-	if err := h.db.Where("enabled = ?", true).Find(&wallets).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "查询收款地址失败"})
+	options, err := h.paymentOptionService.GetOptions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "查询支付选项失败"})
 		return
-	}
-
-	// 统计拥有有效收款钱包的公链
-	activeChainsWithWallet := make(map[string]bool)
-	for _, w := range wallets {
-		norm := model.NormalizeChain(string(w.Chain))
-		activeChainsWithWallet[string(norm)] = true
-	}
-
-	// 2. 结合 config.yaml 中的节点启用状态过滤
-	availableChains := make(map[string]bool)
-	if h.cfg != nil && len(h.cfg.Chains) > 0 {
-		for chain, nodeCfg := range h.cfg.Chains {
-			if nodeCfg.Enabled == nil || *nodeCfg.Enabled {
-				norm := string(model.NormalizeChain(string(chain)))
-				if activeChainsWithWallet[norm] {
-					availableChains[norm] = true
-				}
-			}
-		}
-	} else {
-		availableChains = activeChainsWithWallet
-	}
-
-	// 3. 产出结构化响应
-	options := model.CryptoPaymentOptions{
-		Tokens: []model.CryptoTokenOption{},
-		Chains: make(map[string][]model.CryptoChainOption),
-	}
-
-	if len(availableChains) == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": options,
-		})
-		return
-	}
-
-	// 3. 从数据库查询启用的代币白名单 (支持按 priority 倒序排序)
-	var dbTokens []model.ChainToken
-	if err := h.db.Where("enabled = ?", true).Order("priority DESC, id ASC").Find(&dbTokens).Error; err != nil || len(dbTokens) == 0 {
-		dbTokens = model.GetDefaultChainTokens()
-	}
-
-	tokenMeta := map[string]model.CryptoTokenOption{
-		"USDT": {Symbol: "USDT", Name: "Tether USD", Icon: "fa-solid fa-circle-dollar-to-slot"},
-		"USDC": {Symbol: "USDC", Name: "USD Coin", Icon: "fa-solid fa-circle-dollar-to-slot"},
-		"BTC":  {Symbol: "BTC", Name: "Bitcoin", Icon: "fa-brands fa-bitcoin"},
-		"ETH":  {Symbol: "ETH", Name: "Ethereum", Icon: "fa-brands fa-ethereum"},
-		"BNB":  {Symbol: "BNB", Name: "BNB", Icon: "fa-solid fa-coins"},
-		"SOL":  {Symbol: "SOL", Name: "Solana", Icon: "fa-solid fa-sun"},
-	}
-
-	chainMeta := map[model.Chain]struct {
-		name  string
-		badge string
-	}{
-		model.ChainTron:     {name: "TRC20 (Tron)", badge: "低手续费 / 推荐"},
-		model.ChainArbitrum: {name: "Arbitrum One (L2)", badge: "极速 / 低Gas"},
-		model.ChainBsc:      {name: "BNB Smart Chain", badge: "高吞吐"},
-		model.ChainEth:      {name: "ERC20 (Ethereum)", badge: "主网原生"},
-		model.ChainPolygon:  {name: "Polygon (Matic)", badge: "低费率"},
-		model.ChainSolana:   {name: "Solana", badge: "极速"},
-	}
-
-	seenTokens := make(map[string]bool)
-	for _, dt := range dbTokens {
-		normChain := string(model.NormalizeChain(string(dt.Chain)))
-		if !availableChains[normChain] {
-			continue
-		}
-
-		sym := string(dt.Symbol)
-		cName := string(dt.Chain)
-		cBadge := dt.Badge
-		if meta, exists := chainMeta[dt.Chain]; exists {
-			if meta.name != "" {
-				cName = meta.name
-			}
-			if cBadge == "" {
-				cBadge = meta.badge
-			}
-		}
-
-		cOpt := model.CryptoChainOption{
-			Chain:    dt.Chain,
-			Name:     cName,
-			Badge:    cBadge,
-			Decimals: dt.Decimals,
-		}
-
-		options.Chains[sym] = append(options.Chains[sym], cOpt)
-
-		if !seenTokens[sym] {
-			seenTokens[sym] = true
-			tName := dt.Name
-			tIcon := dt.Icon
-			if tIcon == "" {
-				if meta, ok := tokenMeta[sym]; ok {
-					tIcon = meta.Icon
-					if tName == "" {
-						tName = meta.Name
-					}
-				} else {
-					tIcon = "fa-solid fa-coins"
-				}
-			}
-			if tName == "" {
-				tName = sym
-			}
-			options.Tokens = append(options.Tokens, model.CryptoTokenOption{
-				Symbol: sym,
-				Name:   tName,
-				Icon:   tIcon,
-			})
-		}
-	}
-
-	// 计算默认选中的 Token 与 Chain
-	if len(options.Tokens) > 0 {
-		defaultToken := options.Tokens[0].Symbol
-		for _, t := range options.Tokens {
-			if t.Symbol == "USDT" {
-				defaultToken = "USDT"
-				break
-			}
-		}
-		options.DefaultToken = defaultToken
-
-		if chains, ok := options.Chains[defaultToken]; ok && len(chains) > 0 {
-			options.DefaultChain = string(chains[0].Chain)
-		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

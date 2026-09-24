@@ -55,3 +55,16 @@ func GetDefaultChainTokens() []ChainToken {
 		{Chain: ChainSolana, Symbol: "SOL", Name: "Solana", Contract: "", Decimals: 9, IsNative: true, Icon: "fa-solid fa-sun", Priority: 80, Enabled: true},
 	}
 }
+
+// GetTokenDisplayMeta returns the default presentation metadata for a token.
+func GetTokenDisplayMeta(symbol Token) CryptoTokenOption {
+	meta := map[string]CryptoTokenOption{
+		"USDT": {Symbol: "USDT", Name: "Tether USD", Icon: "fa-solid fa-circle-dollar-to-slot"},
+		"USDC": {Symbol: "USDC", Name: "USD Coin", Icon: "fa-solid fa-circle-dollar-to-slot"},
+		"BTC":  {Symbol: "BTC", Name: "Bitcoin", Icon: "fa-brands fa-bitcoin"},
+		"ETH":  {Symbol: "ETH", Name: "Ethereum", Icon: "fa-brands fa-ethereum"},
+		"BNB":  {Symbol: "BNB", Name: "BNB", Icon: "fa-solid fa-coins"},
+		"SOL":  {Symbol: "SOL", Name: "Solana", Icon: "fa-solid fa-sun"},
+	}
+	return meta[string(symbol)]
+}
