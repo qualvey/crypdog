@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestTronScanner_RejectFakeUSDTToken(t *testing.T) {
@@ -149,4 +151,51 @@ func TestTronScanner_FollowsPagination(t *testing.T) {
 	sc.(*TronScanner).scanSingleAddress(ctx, mockServer.URL, "TTarget", transferChan)
 	assert.Equal(t, 2, requests)
 	assert.Len(t, transferChan, 51)
+}
+
+func TestTronScanner_ResumesPersistedFingerprint(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:tron-cursor-"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.ScanProgress{}))
+	require.NoError(t, db.Create(&model.ScanProgress{
+		Chain:            model.ChainTron,
+		Address:          "TTarget",
+		LastScannedBlock: 1700000000000,
+		LastSignature:    "resume-cursor",
+	}).Error)
+
+	var gotFingerprint string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFingerprint = r.URL.Query().Get("fingerprint")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": []map[string]interface{}{{
+				"transaction_id":  "tx-resumed",
+				"block_timestamp": int64(1700000001000),
+				"block_number":    60000001,
+				"from":            "TFrom",
+				"to":              "TTarget",
+				"value":           "100000000",
+				"token_info": map[string]interface{}{
+					"symbol": "USDT", "address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "decimals": 6,
+				},
+			}},
+		})
+	}))
+	defer mockServer.Close()
+
+	sc, err := NewTronScanner(db, &config.ChainNodeConfig{RPCURL: mockServer.URL})
+	require.NoError(t, err)
+	transferChan := make(chan model.ChainTransfer, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sc.(*TronScanner).scanSingleAddress(ctx, mockServer.URL, "TTarget", transferChan)
+	assert.Equal(t, "resume-cursor", gotFingerprint)
+
+	var progress model.ScanProgress
+	require.NoError(t, db.First(&progress, "chain = ? AND address = ?", model.ChainTron, "TTarget").Error)
+	assert.Equal(t, uint64(1700000001000), progress.LastScannedBlock)
+	assert.Empty(t, progress.LastSignature)
 }

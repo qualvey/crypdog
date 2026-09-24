@@ -283,8 +283,21 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 	t.tsMu.RLock()
 	lastTs := t.lastTimestamps[addr]
 	t.tsMu.RUnlock()
+	fingerprint := ""
 
 	// 若尚未缓存水位线，尝试从 DB 恢复
+	if lastTs == 0 && t.db != nil {
+		var progress model.ScanProgress
+		if err := t.db.WithContext(ctx).
+			Where("chain = ? AND address = ?", model.ChainTron, addr).
+			First(&progress).Error; err == nil && progress.LastScannedBlock > 0 {
+			lastTs = int64(progress.LastScannedBlock)
+			fingerprint = progress.LastSignature
+			t.tsMu.Lock()
+			t.lastTimestamps[addr] = lastTs
+			t.tsMu.Unlock()
+		}
+	}
 	if lastTs == 0 && t.db != nil {
 		var lastTransfer model.ChainTransfer
 		if err := t.db.WithContext(ctx).
@@ -303,7 +316,6 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		}
 	}
 
-	fingerprint := ""
 	complete := false
 
 	var maxTs int64 = lastTs
@@ -411,20 +423,38 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		}
 		if len(trcResp.Data) < 50 || trcResp.Meta.Fingerprint == "" {
 			complete = true
+			if maxTs > lastTs {
+				t.tsMu.Lock()
+				t.lastTimestamps[addr] = maxTs
+				t.tsMu.Unlock()
+			}
+			t.persistTronProgress(ctx, addr, maxTs, "")
 			break
 		}
 		fingerprint = trcResp.Meta.Fingerprint
+		// 保存当前页的 fingerprint。达到分页上限或进程重启后，
+		// 下一轮可以从当前页继续，而不是重复从旧时间戳开始。
+		t.persistTronProgress(ctx, addr, lastTs, fingerprint)
 	}
 
 	if !complete {
 		logger.Warn("TronGrid pagination limit reached; retaining timestamp cursor", "address", addr)
 		return
 	}
-	if maxTs > lastTs {
-		t.tsMu.Lock()
-		t.lastTimestamps[addr] = maxTs
-		t.tsMu.Unlock()
+}
+
+func (t *TronScanner) persistTronProgress(ctx context.Context, addr string, timestamp int64, fingerprint string) {
+	if t.db == nil || timestamp <= 0 {
+		return
 	}
+	progress := model.ScanProgress{
+		Chain:            model.ChainTron,
+		Address:          addr,
+		LastScannedBlock: uint64(timestamp),
+		LastSignature:    fingerprint,
+		UpdatedAt:        time.Now(),
+	}
+	t.db.WithContext(ctx).Save(&progress)
 }
 
 // VerifyTransaction 二次核验 TRON 交易是否在主链成功确认且执行成功
