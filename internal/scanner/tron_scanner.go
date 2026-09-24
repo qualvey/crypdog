@@ -8,6 +8,7 @@ import (
 	"crypdog/internal/model"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"math/rand"
 	"net/http"
@@ -330,20 +331,23 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		if err != nil {
 			return
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
 			logger.Warn("TronGrid API rate limited; backing off", "chain", model.ChainTron, "status", http.StatusTooManyRequests)
 			metrics.RecordScanError(string(model.ChainTron), "rate_limit")
 			return
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
 			return
 		}
 
 		var trcResp TronTRC20Resp
-		if err := json.NewDecoder(resp.Body).Decode(&trcResp); err != nil || !trcResp.Success {
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil || json.Unmarshal(body, &trcResp) != nil || !trcResp.Success {
 			return
 		}
 
