@@ -25,6 +25,7 @@ type TronScanner struct {
 	db             *gorm.DB
 	Cfg            config.ChainNodeConfig
 	latestBlock    atomic.Uint64
+	lastScanOK     atomic.Int64
 	client         *http.Client
 	tokensMu       sync.RWMutex
 	tokens         map[string]model.TokenSpec
@@ -135,6 +136,18 @@ func (t *TronScanner) GetLatestBlock() uint64 {
 	return t.latestBlock.Load()
 }
 
+func (t *TronScanner) IsHealthy() bool {
+	last := t.lastScanOK.Load()
+	if last == 0 {
+		return false
+	}
+	interval := time.Duration(t.Cfg.ScanIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = 3 * time.Second
+	}
+	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
+}
+
 func (t *TronScanner) setLatestBlock(blk uint64) {
 	for {
 		current := t.latestBlock.Load()
@@ -172,8 +185,12 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 }
 
 func (t *TronScanner) scanOnce(ctx context.Context, transferChan chan<- model.ChainTransfer) {
-	t.updateLatestBlock(ctx)
+	if err := t.updateLatestBlock(ctx); err != nil {
+		metrics.RecordScanError(string(model.ChainTron), "tron")
+		return
+	}
 	t.scanActiveTronAddresses(ctx, transferChan)
+	t.lastScanOK.Store(time.Now().Unix())
 }
 
 func (t *TronScanner) updateLatestBlock(ctx context.Context) error {
@@ -193,7 +210,7 @@ func (t *TronScanner) updateLatestBlock(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return err
+		return fmt.Errorf("tron latest block API error: status %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 

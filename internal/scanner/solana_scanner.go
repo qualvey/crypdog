@@ -33,6 +33,7 @@ type SolanaScanner struct {
 	cfg         *config.ChainNodeConfig // 统一配置 (批次大小、扫描间隔、重试次数等)
 	client      *http.Client            // Solana 专用 RPC Client (或标准的 *http.Client)
 	latestBlock atomic.Uint64           // 保证并发安全
+	lastScanOK  atomic.Int64            // Unix time of the last successful scan cycle
 	// 2. 接口实现所需状态 (实现 Scanner.GetLatestBlock())
 	latestSlot atomic.Uint64 // 记录当前全网最新 Slot 高度
 	rpcURL     string
@@ -103,6 +104,18 @@ func (s *SolanaScanner) GetLatestBlock() uint64 {
 	return s.latestBlock.Load()
 }
 
+func (s *SolanaScanner) IsHealthy() bool {
+	last := s.lastScanOK.Load()
+	if last == 0 {
+		return false
+	}
+	interval := 3 * time.Second
+	if s.cfg != nil && s.cfg.ScanIntervalSec > 0 {
+		interval = time.Duration(s.cfg.ScanIntervalSec) * time.Second
+	}
+	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
+}
+
 // 最佳工程实践：对于这种 I/O 密集型轮询任务，通常更推荐显式延时（time.Sleep 或每次执行完后 Reset(timer)），
 // 确保两次扫描之间始终有固定的休息间隔，或者引入并发防重入锁。
 func (s *SolanaScanner) Start(ctx context.Context, transferChan chan<- model.ChainTransfer) error {
@@ -129,7 +142,10 @@ func (s *SolanaScanner) Start(ctx context.Context, transferChan chan<- model.Cha
 
 func (s *SolanaScanner) scanActiveAddresses(ctx context.Context, transferChan chan<- model.ChainTransfer) {
 	// 无论是否有活跃监听地址，每个扫描周期始终必须刷新链上最新高度，防止无 WATCHING 订单时 CONFIRMING 订单确认数检测卡死
-	s.refreshLatestSlot(ctx)
+	if err := s.refreshLatestSlot(ctx); err != nil {
+		return
+	}
+	s.lastScanOK.Store(time.Now().Unix())
 
 	addresses := s.getActiveTargetAddresses()
 	if len(addresses) == 0 {

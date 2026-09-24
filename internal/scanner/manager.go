@@ -26,6 +26,12 @@ type TxVerifier interface {
 	VerifyTransaction(ctx context.Context, txHash string, blockNumber uint64) (bool, error)
 }
 
+// ScannerHealth is implemented by built-in scanners to expose recent RPC
+// health without changing the base Scanner interface.
+type ScannerHealth interface {
+	IsHealthy() bool
+}
+
 type ScannerFactory func(chain model.Chain, db *gorm.DB, chainCfg config.ChainNodeConfig) (Scanner, error)
 
 type Simulator interface {
@@ -146,6 +152,37 @@ func (m *Manager) GetScannersStatus() map[string]uint64 {
 		status[name] = s.GetLatestBlock()
 	}
 	return status
+}
+
+// GetAvailableChains returns chains whose scanner has recently completed a
+// successful RPC cycle. Configuration and wallet state alone are insufficient
+// for advertising a usable payment chain.
+func (m *Manager) GetAvailableChains() map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	available := make(map[string]bool)
+	for name, s := range m.scanners {
+		healthy := false
+		if health, ok := s.(ScannerHealth); ok {
+			healthy = health.IsHealthy()
+		} else {
+			// Keep compatibility with external scanners predating ScannerHealth.
+			healthy = s.GetLatestBlock() > 0
+		}
+		if healthy {
+			available[string(model.NormalizeChain(name))] = true
+		}
+	}
+	return available
+}
+
+// HasScanners distinguishes an uninitialized manager (useful to embedded
+// callers/tests) from an initialized manager with no healthy chain.
+func (m *Manager) HasScanners() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.scanners) > 0
 }
 
 // VerifyTransaction 二次核验指定链交易的有效性，若扫描器支持 TxVerifier 则调用二次核验

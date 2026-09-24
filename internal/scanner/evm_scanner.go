@@ -64,6 +64,7 @@ type EvmScanner struct {
 	cfg              *config.ChainNodeConfig
 	// 运行状态
 	latestBlock atomic.Uint64 // 当前全网高度
+	lastScanOK  atomic.Int64  // Unix time of the last successful scan cycle
 	scannedSlot uint64        // 当前已确认落库的扫描进度 (单协程内维护无需 atomic)
 	curBatch    uint64        // 动态 batch 大小 (支持遇到 10000 limit 时自适应下调)
 	// 新增：本链支持的代币集合 (Key 为小写合约地址，原生币可约定为空字符串)
@@ -120,6 +121,18 @@ func (s *EvmScanner) Chain() model.Chain {
 }
 func (s *EvmScanner) GetLatestBlock() uint64 {
 	return s.latestBlock.Load()
+}
+
+func (s *EvmScanner) IsHealthy() bool {
+	last := s.lastScanOK.Load()
+	if last == 0 {
+		return false
+	}
+	interval := 3 * time.Second
+	if s.cfg != nil && s.cfg.ScanIntervalSec > 0 {
+		interval = time.Duration(s.cfg.ScanIntervalSec) * time.Second
+	}
+	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
 }
 func (s *EvmScanner) SupportedTokens() []model.TokenSpec {
 	s.tokensMu.RLock()
@@ -298,6 +311,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 	safeBlock := latestOnChain - blockDelay
 	// 还没有新出的安全块，等待下一轮
 	if safeBlock <= e.lastScannedBlock {
+		e.lastScanOK.Store(time.Now().Unix())
 		return nil
 	}
 	fromBlock := e.lastScannedBlock + 1
@@ -311,7 +325,11 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 		if toBlock > safeBlock {
 			toBlock = safeBlock
 		}
-		return e.commitProgress(ctx, toBlock)
+		if err := e.commitProgress(ctx, toBlock); err != nil {
+			return err
+		}
+		e.lastScanOK.Store(time.Now().Unix())
+		return nil
 	}
 	walletMap := make(map[string]bool, len(activeWallets))
 	targetAddrs := make([]string, 0, len(activeWallets))
@@ -407,7 +425,11 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 	}
 
 	// 5. 游标必须事务落库持久化
-	return e.commitProgress(ctx, toBlock)
+	if err := e.commitProgress(ctx, toBlock); err != nil {
+		return err
+	}
+	e.lastScanOK.Store(time.Now().Unix())
+	return nil
 }
 
 // commitProgress 原子持久化游标

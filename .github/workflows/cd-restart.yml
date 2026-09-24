@@ -1,0 +1,51 @@
+name: CD Restart
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Redeploy existing image
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/crypdog' }}
+    steps:
+      - name: Pull and recreate production service
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: DEPLOY_PATH,GHCR_USERNAME,GHCR_TOKEN
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            test -s .env
+            test -s .release.env
+            chmod 600 .env .release.env
+            grep -q '^CRYPDOG_IMAGE=' .release.env
+            grep -q '^CRYPDOG_SECRET=' .env
+            grep -q '^CRYPDOG_ADMIN_SECRET=' .env
+            grep -q '^CRYPDOG_WEBHOOK_SECRET=' .env
+            grep -q '^CRYPDOG_METRICS_SECRET=' .env
+            grep -q '^POSTGRES_PASSWORD=' .env
+            if [ -n "${GHCR_TOKEN:-}" ]; then
+              printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+            fi
+            compose() {
+              docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env "$@"
+            }
+            compose config --quiet
+            compose pull crypdog
+            compose up -d --no-build --force-recreate --remove-orphans crypdog
+            compose ps
+            curl --fail --retry 10 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 5 http://127.0.0.1:8081/healthz/ready
