@@ -9,6 +9,7 @@ import (
 	"crypdog/internal/model"
 
 	"github.com/glebarez/sqlite"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -66,4 +67,28 @@ func TestSeedInitialWallets_NoCrossChainDisable(t *testing.T) {
 	var tronWalletInDB model.WalletAddress
 	require.NoError(t, database.Where("address = ?", tronWallet.Address).First(&tronWalletInDB).Error)
 	assert.True(t, tronWalletInDB.Enabled, "配置只更新 Arbitrum 钱包时，TRON 的已有钱包必须保持 enabled=true")
+}
+
+func TestBackfillAllocationKeys_RestoresActiveIntents(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:backfill-"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.PaymentIntent{}))
+
+	intent := model.PaymentIntent{
+		ID:             "intent_old_schema",
+		OrderID:        "order_old_schema",
+		Chain:          model.ChainArbitrum,
+		Token:          model.TokenUSDC,
+		TargetAddress:  "0x7bdc49542978b16566e82c8f90db1eb03804c675",
+		ExpectedAmount: decimal.RequireFromString("10.0001"),
+		Status:         model.StatusWatching,
+	}
+	require.NoError(t, database.Create(&intent).Error)
+
+	backfillAllocationKeys(database)
+
+	var restored model.PaymentIntent
+	require.NoError(t, database.First(&restored, "id = ?", intent.ID).Error)
+	require.NotNil(t, restored.AllocationKey)
+	require.Equal(t, model.BuildAllocationKey(intent.Chain, intent.Token, intent.TargetAddress, intent.ExpectedAmount), *restored.AllocationKey)
 }
