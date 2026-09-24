@@ -349,6 +349,41 @@ func TestAllocateOrReactivate_ConcurrentSafety(t *testing.T) {
 	assert.Equal(t, concurrency, count)
 }
 
+// Separate service instances have separate in-process locks. The database
+// uniqueness key must still prevent a cross-instance allocation collision.
+func TestRegisterOrReactivate_CrossInstanceUniqueness(t *testing.T) {
+	db := setupTestDB(t)
+	first := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+	second := service.NewIntentService(db, engine.NewMicroAmountManager(db))
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for i, svc := range []*service.IntentService{first, second} {
+		go func(i int, svc *service.IntentService) {
+			<-start
+			dto := defaultDTO()
+			dto.OrderID = fmt.Sprintf("ord_cross_instance_%d", i)
+			_, _, err := svc.RegisterOrReactivate(dto)
+			errs <- err
+		}(i, svc)
+	}
+	close(start)
+
+	var successes, collisions int
+	for i := 0; i < 2; i++ {
+		switch err := <-errs; {
+		case err == nil:
+			successes++
+		case err == service.ErrAmountCollision:
+			collisions++
+		default:
+			t.Fatalf("unexpected cross-instance allocation error: %v", err)
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, 1, collisions)
+}
+
 func TestCancelIntent_Restrictions(t *testing.T) {
 	db := setupTestDB(t)
 	svc := service.NewIntentService(db, engine.NewMicroAmountManager(db))
