@@ -11,6 +11,7 @@ import (
 
 	"math/rand"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,9 @@ type TronTRC20Tx struct {
 type TronTRC20Resp struct {
 	Data    []TronTRC20Tx `json:"data"`
 	Success bool          `json:"success"`
+	Meta    struct {
+		Fingerprint string `json:"fingerprint"`
+	} `json:"meta"`
 }
 
 func NewTronScanner(db *gorm.DB, nodeCfg *config.ChainNodeConfig) (Scanner, error) {
@@ -298,102 +302,120 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 		}
 	}
 
-	url := fmt.Sprintf("%s/v1/accounts/%s/transactions/trc20?limit=50&only_to=true", baseURL, addr)
-	if lastTs > 0 {
-		url = fmt.Sprintf("%s&min_timestamp=%d", url, lastTs)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return
-	}
-	if t.Cfg.APIKey != "" {
-		req.Header.Set("TRON-PRO-API-KEY", t.Cfg.APIKey)
-	}
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		logger.Warn("TronGrid API rate limited; backing off", "chain", model.ChainTron, "status", http.StatusTooManyRequests)
-		metrics.RecordScanError(string(model.ChainTron), "rate_limit")
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var trcResp TronTRC20Resp
-	if err := json.NewDecoder(resp.Body).Decode(&trcResp); err != nil || !trcResp.Success {
-		return
-	}
+	fingerprint := ""
+	complete := false
 
 	var maxTs int64 = lastTs
 	txCountMap := make(map[string]int64)
-
-	for _, tx := range trcResp.Data {
-		if !strings.EqualFold(tx.To, addr) {
-			continue
+	// TronGrid caps a page at 50 records. Follow its fingerprint cursor so a
+	// busy receiving wallet cannot silently skip transfers between scans.
+	for page := 0; page < 20; page++ {
+		url := fmt.Sprintf("%s/v1/accounts/%s/transactions/trc20?limit=50&only_to=true", baseURL, addr)
+		if lastTs > 0 {
+			url = fmt.Sprintf("%s&min_timestamp=%d", url, lastTs)
+		}
+		if fingerprint != "" {
+			url = fmt.Sprintf("%s&fingerprint=%s", url, urlpkg.QueryEscape(fingerprint))
 		}
 
-		if tx.BlockTimestamp > maxTs {
-			maxTs = tx.BlockTimestamp
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return
+		}
+		if t.Cfg.APIKey != "" {
+			req.Header.Set("TRON-PRO-API-KEY", t.Cfg.APIKey)
 		}
 
-		// 严格核验 TRC-20 合约地址（防假币 / 投毒币攻击）
-		contractAddr := strings.TrimSpace(tx.TokenInfo.Address)
-		t.tokensMu.RLock()
-		spec, isKnown := t.tokens[contractAddr]
-		t.tokensMu.RUnlock()
-		if !isKnown {
-			logger.Error("non-whitelisted or counterfeit token blocked", "chain", model.ChainTron, "contract", contractAddr, "token", tx.TokenInfo.Symbol, "tx_hash", tx.TransactionID, "target_address", tx.To)
-			continue
+		resp, err := t.client.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			logger.Warn("TronGrid API rate limited; backing off", "chain", model.ChainTron, "status", http.StatusTooManyRequests)
+			metrics.RecordScanError(string(model.ChainTron), "rate_limit")
+			return
 		}
 
-		decimals := int32(spec.Decimals)
-		if decimals <= 0 {
-			decimals = tx.TokenInfo.Decimals
+		if resp.StatusCode != http.StatusOK {
+			return
+		}
+
+		var trcResp TronTRC20Resp
+		if err := json.NewDecoder(resp.Body).Decode(&trcResp); err != nil || !trcResp.Success {
+			return
+		}
+
+		for _, tx := range trcResp.Data {
+			if !strings.EqualFold(tx.To, addr) {
+				continue
+			}
+
+			if tx.BlockTimestamp > maxTs {
+				maxTs = tx.BlockTimestamp
+			}
+
+			// 严格核验 TRC-20 合约地址（防假币 / 投毒币攻击）
+			contractAddr := strings.TrimSpace(tx.TokenInfo.Address)
+			t.tokensMu.RLock()
+			spec, isKnown := t.tokens[contractAddr]
+			t.tokensMu.RUnlock()
+			if !isKnown {
+				logger.Error("non-whitelisted or counterfeit token blocked", "chain", model.ChainTron, "contract", contractAddr, "token", tx.TokenInfo.Symbol, "tx_hash", tx.TransactionID, "target_address", tx.To)
+				continue
+			}
+
+			decimals := int32(spec.Decimals)
 			if decimals <= 0 {
-				decimals = 6
+				decimals = tx.TokenInfo.Decimals
+				if decimals <= 0 {
+					decimals = 6
+				}
+			}
+
+			// 使用 decimal 无损高精度计算，防止大额资金丢精度
+			valDec, err := decimal.NewFromString(tx.Value)
+			if err != nil {
+				continue
+			}
+			amount := valDec.Div(decimal.New(1, decimals))
+
+			logIdx := txCountMap[tx.TransactionID]
+			txCountMap[tx.TransactionID]++
+
+			transfer := model.ChainTransfer{
+				TxHash:         tx.TransactionID,
+				Chain:          model.ChainTron,
+				LogIndex:       logIdx,
+				Contract:       contractAddr,
+				FromAddress:    tx.From,
+				TargetAddress:  tx.To,
+				Amount:         amount,
+				RawValue:       tx.Value,
+				Token:          spec.Symbol, // 使用白名单中权威核验的 Symbol
+				Decimals:       uint8(decimals),
+				BlockNumber:    tx.BlockNumber,
+				BlockTimestamp: tx.BlockTimestamp / 1000,
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case transferChan <- transfer:
+				metrics.RecordTransferCaptured(string(model.ChainTron), string(transfer.Token))
 			}
 		}
-
-		// 使用 decimal 无损高精度计算，防止大额资金丢精度
-		valDec, err := decimal.NewFromString(tx.Value)
-		if err != nil {
-			continue
+		if len(trcResp.Data) < 50 || trcResp.Meta.Fingerprint == "" {
+			complete = true
+			break
 		}
-		amount := valDec.Div(decimal.New(1, decimals))
-
-		logIdx := txCountMap[tx.TransactionID]
-		txCountMap[tx.TransactionID]++
-
-		transfer := model.ChainTransfer{
-			TxHash:         tx.TransactionID,
-			Chain:          model.ChainTron,
-			LogIndex:       logIdx,
-			Contract:       contractAddr,
-			FromAddress:    tx.From,
-			TargetAddress:  tx.To,
-			Amount:         amount,
-			RawValue:       tx.Value,
-			Token:          spec.Symbol, // 使用白名单中权威核验的 Symbol
-			Decimals:       uint8(decimals),
-			BlockNumber:    tx.BlockNumber,
-			BlockTimestamp: tx.BlockTimestamp / 1000,
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case transferChan <- transfer:
-			metrics.RecordTransferCaptured(string(model.ChainTron), string(transfer.Token))
-		}
+		fingerprint = trcResp.Meta.Fingerprint
 	}
 
+	if !complete {
+		logger.Warn("TronGrid pagination limit reached; retaining timestamp cursor", "address", addr)
+		return
+	}
 	if maxTs > lastTs {
 		t.tsMu.Lock()
 		t.lastTimestamps[addr] = maxTs
