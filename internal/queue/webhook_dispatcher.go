@@ -186,8 +186,25 @@ func (w *WebhookDispatcher) retryPendingLogs(ctx context.Context) {
 			continue // 已被并发消费，跳过
 		}
 
+		nextAttempt := l.Attempt + 1
+		var existingNextAttempt int64
+		w.db.Model(&model.WebhookLog{}).
+			Where("order_id = ? AND event = ? AND attempt = ?", l.OrderID, event, nextAttempt).
+			Count(&existingNextAttempt)
+		if existingNextAttempt > 0 {
+			// 进程可能在创建下一次投递记录后、清理旧记录前崩溃。
+			// 发现子记录后直接收敛旧记录，避免重复生成同一次重试。
+			w.db.Model(&model.WebhookLog{}).Where("id = ?", l.ID).
+				Updates(map[string]interface{}{"next_retry_at": nil, "retry_claimed_at": nil})
+			continue
+		}
+
 		logger.Info("retrying webhook delivery", "order_id", l.OrderID, "event", event, "attempt", l.Attempt+1)
-		w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, l.Attempt+1)
+		if w.DeliverWithRetry(l.OrderID, l.WebhookURL, payload, nextAttempt) {
+			// 新记录已经持久化，旧记录不再是待重试任务。
+			w.db.Model(&model.WebhookLog{}).Where("id = ?", l.ID).
+				Updates(map[string]interface{}{"next_retry_at": nil, "retry_claimed_at": nil})
+		}
 	}
 }
 
@@ -222,17 +239,17 @@ func (w *WebhookDispatcher) DispatchAsync(intent *model.PaymentIntent, txHash st
 }
 
 // DeliverWithRetry sends the payload and registers retry schedule in DB (handled exclusively by StartRetryWorker)
-func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload WebhookPayload, attempt int) {
+func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload WebhookPayload, attempt int) bool {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
 		logger.Error("marshal webhook payload failed", "order_id", orderID, "error", err)
-		return
+		return false
 	}
 	allowLocal := w.cfg != nil && w.cfg.Webhook.AllowLocal
 	requireHTTPS := w.cfg != nil && (strings.EqualFold(w.cfg.Env, "production") || strings.EqualFold(w.cfg.Env, "prod"))
 	if err := signature.ValidateWebhookURL(webhookURL, allowLocal, requireHTTPS); err != nil {
 		logger.Warn("webhook target rejected", "order_id", orderID, "error", err)
-		return
+		return false
 	}
 
 	sig := signature.GenerateHMACSHA256(jsonBytes, w.cfg.Webhook.Secret)
@@ -240,7 +257,7 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
 		logger.Error("create webhook request failed", "order_id", orderID, "error", err)
-		return
+		return false
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -285,12 +302,15 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 		webhookLog.NextRetryAt = &nextRetryAt
 	}
 
-	w.db.Create(&webhookLog)
+	if err := w.db.Create(&webhookLog).Error; err != nil {
+		logger.Error("persist webhook delivery log failed", "order_id", orderID, "attempt", attempt, "error", err)
+		return false
+	}
 
 	if success {
 		metrics.RecordWebhookDispatch("success", durationSec)
 		logger.Info("webhook delivered", "order_id", orderID, "event", payload.Event, "attempt", attempt)
-		return
+		return true
 	}
 
 	logger.Warn("webhook delivery failed", "order_id", orderID, "status", webhookLog.StatusCode, "attempt", attempt, "error", err)
@@ -303,4 +323,5 @@ func (w *WebhookDispatcher) DeliverWithRetry(orderID, webhookURL string, payload
 		metrics.RecordWebhookDispatch("max_retried", durationSec)
 		logger.Error("webhook delivery exceeded max retries", "order_id", orderID, "attempt", attempt)
 	}
+	return true
 }
