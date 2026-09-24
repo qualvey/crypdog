@@ -157,3 +157,34 @@ func TestEvmRPCClient_Failover(t *testing.T) {
 	assert.Error(t, errAllFailed)
 	assert.Contains(t, errAllFailed.Error(), "all 1 rpc nodes failed")
 }
+
+func TestEvmRPCClient_RPCFaults(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "rate limited",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+		},
+		{
+			name: "malformed json",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("not-json"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client := NewEvmRPCClient(server.URL)
+			_, err := client.GetLatestBlockNumber(context.Background())
+			assert.Error(t, err, "RPC faults must not be treated as a successful block response")
+		})
+	}
+}
