@@ -146,22 +146,24 @@ jobs:
             printf 'CRYPDOG_IMAGE=%s\n' "$IMAGE" > .release.env.tmp
             chmod 600 .release.env.tmp
             mv .release.env.tmp .release.env
-            COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env"
+            compose() {
+              docker compose -f docker-compose.prod.yml --env-file .env --env-file .release.env "$@"
+            }
             # Validate interpolation with the production .env before touching
             # the running service. The .env file is deliberately kept on the
             # host and is never copied into the repository or image.
-            $COMPOSE config --quiet
-            $COMPOSE pull crypdog
+            compose config --quiet
+            compose pull crypdog
             # --force-recreate is required when .env values change: a plain
             # restart reuses the old container environment and does not reload
             # interpolated variables.
-            $COMPOSE up -d --no-build --force-recreate --remove-orphans crypdog
-            $COMPOSE ps
-            CONTAINER_ID="$($COMPOSE ps -q crypdog)"
+            compose up -d --no-build --force-recreate --remove-orphans crypdog
+            compose ps
+            CONTAINER_ID="$(compose ps -q crypdog)"
             test -n "$CONTAINER_ID"
             test "$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID")" = "$IMAGE" || {
               echo 'crypdog container was not recreated with the requested image'
-              $COMPOSE ps -a
+              compose ps -a
               exit 1
             }
             # The service runs AutoMigrate before opening HTTP (PostgreSQL can
