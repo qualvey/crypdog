@@ -50,11 +50,22 @@ func ReadyHandler(h *Handler) gin.HandlerFunc {
 		scannersComponent := gin.H{}
 		if h.scannerMgr != nil {
 			scannerStatuses := h.scannerMgr.GetScannersStatus()
+			healthyChains := h.scannerMgr.GetAvailableChains()
 			for chain, latestBlock := range scannerStatuses {
+				status := "DOWN"
+				if healthyChains[chain] {
+					status = "UP"
+				}
 				scannersComponent[chain] = gin.H{
-					"status":       "ACTIVE",
+					"status":       status,
 					"latest_block": latestBlock,
 				}
+			}
+			// A database-only ready state can accept orders that nobody scans.
+			// Require at least one healthy scanner when scanners are configured.
+			if h.scannerMgr.HasScanners() && len(healthyChains) == 0 {
+				overallStatus = "DOWN"
+				httpCode = http.StatusServiceUnavailable
 			}
 		}
 		components["scanners"] = scannersComponent
