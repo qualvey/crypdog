@@ -108,10 +108,11 @@ func (w *ConfirmationWorker) checkConfirmations() {
 			res := w.db.Model(&model.PaymentIntent{}).
 				Where("id = ? AND status = ?", intent.ID, model.StatusConfirming).
 				Updates(map[string]interface{}{
-					"status":        model.StatusPaid,
-					"confirmations": confirmations,
-					"paid_at":       &now,
-					"updated_at":    now,
+					"status":         model.StatusPaid,
+					"allocation_key": nil,
+					"confirmations":  confirmations,
+					"paid_at":        &now,
+					"updated_at":     now,
 				})
 			if res.Error != nil {
 				logger.Error("payment status update failed", "order_id", intent.OrderID, "error", res.Error)

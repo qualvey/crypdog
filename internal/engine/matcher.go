@@ -191,6 +191,7 @@ func (e *MatcherEngine) settle(intent *model.PaymentIntent, transfer *model.Chai
 
 	if isPaid {
 		intent.Status = model.StatusPaid
+		intent.AllocationKey = nil
 		intent.PaidAt = &now
 		transfer.MatchedOrderID = intent.OrderID
 		metrics.RecordIntentStatus(string(intent.Chain), string(intent.Token), string(model.StatusPaid))

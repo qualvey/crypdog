@@ -58,6 +58,7 @@ func InitDB(cfg *config.Config) *gorm.DB {
 	}
 
 	logger.Info("database migration completed")
+	backfillAllocationKeys(DB)
 
 	// 播种初始默认代币与收款钱包
 	seedInitialTokens(DB)
@@ -75,6 +76,26 @@ func InitDB(cfg *config.Config) *gorm.DB {
 	// 设置连接最大生命周期（防止连接被防火墙/云数据库单方面切断）
 	sqlDB.SetConnMaxLifetime(time.Hour)
 	return DB
+}
+
+// backfillAllocationKeys upgrades databases created before the allocation
+// uniqueness key existed. A duplicate active key intentionally fails loudly
+// during startup instead of allowing ambiguous payment matching.
+func backfillAllocationKeys(database *gorm.DB) {
+	var intents []model.PaymentIntent
+	if err := database.Where("allocation_key IS NULL AND status IN ?", []model.IntentStatus{
+		model.StatusWatching, model.StatusConfirming,
+	}).Find(&intents).Error; err != nil {
+		logger.Fatal("allocation key backfill query failed", "error", err)
+	}
+	for i := range intents {
+		key := model.BuildAllocationKey(intents[i].Chain, intents[i].Token, intents[i].TargetAddress, intents[i].ExpectedAmount)
+		if err := database.Model(&model.PaymentIntent{}).
+			Where("id = ? AND allocation_key IS NULL", intents[i].ID).
+			Update("allocation_key", key).Error; err != nil {
+			logger.Fatal("allocation key backfill failed", "order_id", intents[i].OrderID, "error", err)
+		}
+	}
 }
 
 func seedInitialTokens(database *gorm.DB) {

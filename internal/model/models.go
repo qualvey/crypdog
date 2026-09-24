@@ -29,6 +29,9 @@ type PaymentIntent struct {
 	TargetAddress string `gorm:"size:128;not null;index:idx_collision,priority:1" json:"targetAddress"`
 	// 1. 金额改用定点数，与 DB 的 decimal(24,8) 完美对应，杜绝 float 误差
 	ExpectedAmount decimal.Decimal `gorm:"type:decimal(36,18);not null;index:idx_collision,priority:2" json:"expectedAmount"`
+	// Non-nil only while an intent can receive a payment. The unique index
+	// prevents amount allocation races across service replicas.
+	AllocationKey  *string         `gorm:"size:512;uniqueIndex" json:"-"`
 	ReceivedAmount decimal.Decimal `gorm:"type:decimal(36,18);default:0" json:"receivedAmount"`
 	TimeoutSeconds int             `gorm:"not null;default:1800" json:"timeoutSeconds"`
 	WebhookURL     string          `gorm:"size:512;not null" json:"webhookUrl"`
@@ -66,18 +69,19 @@ type ChainTransfer struct {
 
 // WebhookLog records outgoing webhook delivery attempts and status
 type WebhookLog struct {
-	ID           uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	OrderID      string     `gorm:"size:128;not null;index" json:"orderId"`
-	Event        string     `gorm:"size:32;not null;default:'confirm';index" json:"event"`
-	WebhookURL   string     `gorm:"size:512;not null" json:"webhookUrl"`
-	Payload      string     `gorm:"type:text;not null" json:"payload"`
-	Signature    string     `gorm:"size:128;not null" json:"signature"`
-	StatusCode   int        `json:"statusCode"`
-	ResponseBody string     `gorm:"type:text" json:"responseBody"`
-	Success      bool       `json:"success"`
-	Attempt      int        `json:"attempt"`
-	NextRetryAt  *time.Time `json:"nextRetryAt,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
+	ID             uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	OrderID        string     `gorm:"size:128;not null;index" json:"orderId"`
+	Event          string     `gorm:"size:32;not null;default:'confirm';index" json:"event"`
+	WebhookURL     string     `gorm:"size:512;not null" json:"webhookUrl"`
+	Payload        string     `gorm:"type:text;not null" json:"payload"`
+	Signature      string     `gorm:"size:128;not null" json:"signature"`
+	StatusCode     int        `json:"statusCode"`
+	ResponseBody   string     `gorm:"type:text" json:"responseBody"`
+	Success        bool       `json:"success"`
+	Attempt        int        `json:"attempt"`
+	NextRetryAt    *time.Time `json:"nextRetryAt,omitempty"`
+	RetryClaimedAt *time.Time `json:"-"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 // AdminAuditLog records privileged control-plane operations.
@@ -145,6 +149,18 @@ type WalletAddress struct {
 // TableName 自定义表名
 func (WalletAddress) TableName() string {
 	return "wallet_addresses"
+}
+
+// BuildAllocationKey is the database-enforced uniqueness scope for an active
+// payment intent. Addresses are normalized before they reach this function.
+func BuildAllocationKey(chain Chain, token Token, address string, amount decimal.Decimal) string {
+	normalizedChain := NormalizeChain(string(chain))
+	return strings.Join([]string{
+		string(normalizedChain),
+		strings.ToUpper(strings.TrimSpace(string(token))),
+		normalizedChain.NormalizeAddress(address),
+		amount.String(),
+	}, "|")
 }
 
 // String 实现 fmt.Stringer 接口，也能直接转原生 string

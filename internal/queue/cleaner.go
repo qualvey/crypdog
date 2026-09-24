@@ -48,7 +48,11 @@ func (c *IntentCleaner) cleanExpiredIntents() {
 	now := time.Now()
 	res := c.db.Model(&model.PaymentIntent{}).
 		Where("status = ? AND expires_at <= ?", model.StatusWatching, now).
-		Update("status", model.StatusExpired)
+		Updates(map[string]interface{}{
+			"status":         model.StatusExpired,
+			"allocation_key": nil,
+			"updated_at":     now,
+		})
 
 	if res.Error != nil {
 		logger.Error("cleaning expired intents failed", "error", res.Error)

@@ -102,6 +102,9 @@ func (s *IntentService) RegisterOrReactivate(dto RegisterDTO) (*model.PaymentInt
 	intent := s.buildNewIntent(dto)
 	//落库
 	if err := s.db.Create(&intent).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, false, ErrAmountCollision
+		}
 		return nil, false, err
 	}
 	return &intent, false, nil
@@ -123,6 +126,18 @@ func (s *IntentService) checkCollision(dto RegisterDTO) error {
 		return ErrAmountCollision
 	}
 	return nil
+}
+
+func allocationKey(dto RegisterDTO) *string {
+	key := model.BuildAllocationKey(dto.Chain, dto.Token, dto.TargetAddress, dto.ExpectedAmount)
+	return &key
+}
+
+func isUniqueConstraintError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint") ||
+		strings.Contains(message, "duplicate key") ||
+		strings.Contains(message, "duplicate entry")
 }
 
 func isIdempotentMatch(existing *model.PaymentIntent, dto *RegisterDTO) bool {
@@ -155,6 +170,7 @@ func (s *IntentService) resetExistingIntent(intent *model.PaymentIntent, dto Reg
 	intent.Token = dto.Token
 	intent.TargetAddress = dto.Chain.NormalizeAddress(dto.TargetAddress)
 	intent.ExpectedAmount = dto.ExpectedAmount
+	intent.AllocationKey = allocationKey(dto)
 	intent.ReceivedAmount = decimal.New(0, 0)
 	intent.WebhookURL = dto.WebhookURL
 	intent.Status = model.StatusWatching
@@ -220,6 +236,9 @@ func (s *IntentService) AllocateOrReactivate(dto AllocateDTO) (*model.PaymentInt
 			}
 			s.resetExistingIntent(&existing, regDTO)
 			if err := s.db.Save(&existing).Error; err != nil {
+				if isUniqueConstraintError(err) {
+					return nil, decimal.Zero, false, ErrAmountCollision
+				}
 				return nil, decimal.Zero, false, err
 			}
 			tail := allocatedAmount.Sub(dto.BaseAmount)
@@ -247,6 +266,9 @@ func (s *IntentService) AllocateOrReactivate(dto AllocateDTO) (*model.PaymentInt
 
 	intent := s.buildNewIntent(regDTO)
 	if err := s.db.Create(&intent).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, decimal.Zero, false, ErrAmountCollision
+		}
 		return nil, decimal.Zero, false, err
 	}
 	tail := allocatedAmount.Sub(dto.BaseAmount)
@@ -263,6 +285,7 @@ func (s *IntentService) buildNewIntent(dto RegisterDTO) model.PaymentIntent {
 		Token:          dto.Token,
 		TargetAddress:  dto.Chain.NormalizeAddress(dto.TargetAddress),
 		ExpectedAmount: dto.ExpectedAmount,
+		AllocationKey:  allocationKey(dto),
 		TimeoutSeconds: dto.TimeoutSeconds,
 		WebhookURL:     dto.WebhookURL,
 		Status:         model.StatusWatching,
@@ -306,6 +329,7 @@ func (s *IntentService) CancelIntent(idOrOrderID string) (*model.PaymentIntent, 
 	}
 
 	intent.Status = model.StatusCancelled
+	intent.AllocationKey = nil
 	intent.UpdatedAt = time.Now()
 	if err := s.db.Save(&intent).Error; err != nil {
 		return nil, fmt.Errorf("failed to save cancelled intent: %w", err)
