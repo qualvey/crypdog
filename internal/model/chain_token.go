@@ -27,44 +27,31 @@ func (ChainToken) TableName() string {
 func GetDefaultChainTokens() []ChainToken {
 	return []ChainToken{
 		// TRON
-		{Chain: ChainTron, Symbol: TokenUSDT, Name: "Tether USD", Contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "低手续费 / 推荐", Priority: 100, Enabled: true},
-		{Chain: ChainTron, Symbol: TokenUSDC, Name: "USD Coin", Contract: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Priority: 90, Enabled: true},
+		{Chain: ChainTron, Symbol: TokenUSDT, Name: "Tether USD", Contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", Decimals: 6, Priority: 100, Enabled: true},
+		{Chain: ChainTron, Symbol: TokenUSDC, Name: "USD Coin", Contract: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8", Decimals: 6, Priority: 90, Enabled: true},
 
 		// ARBITRUM
-		{Chain: ChainArbitrum, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0xaf88d065e77c8cc2239327c5edb3a432268e5831", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "极速 / 低Gas", Priority: 100, Enabled: true},
-		{Chain: ChainArbitrum, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "极速 / 低Gas", Priority: 95, Enabled: true},
-		{Chain: ChainArbitrum, Symbol: TokenETH, Name: "Ethereum", Contract: "", Decimals: 18, IsNative: true, Icon: "fa-brands fa-ethereum", Priority: 80, Enabled: true},
+		{Chain: ChainArbitrum, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0xaf88d065e77c8cc2239327c5edb3a432268e5831", Decimals: 6, Priority: 100, Enabled: true},
+		{Chain: ChainArbitrum, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", Decimals: 6, Priority: 95, Enabled: true},
+		{Chain: ChainArbitrum, Symbol: TokenETH, Name: "Ethereum", Contract: "", Decimals: 18, IsNative: true, Priority: 80, Enabled: true},
 
 		// BSC
-		{Chain: ChainBsc, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0x55d398326f99059ff775485246999027b3197955", Decimals: 18, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "高吞吐", Priority: 100, Enabled: true},
-		{Chain: ChainBsc, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d", Decimals: 18, Icon: "fa-solid fa-circle-dollar-to-slot", Priority: 90, Enabled: true},
-		{Chain: ChainBsc, Symbol: TokenBNB, Name: "BNB", Contract: "", Decimals: 18, IsNative: true, Icon: "fa-solid fa-coins", Priority: 80, Enabled: true},
+		{Chain: ChainBsc, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0x55d398326f99059ff775485246999027b3197955", Decimals: 18, Priority: 100, Enabled: true},
+		{Chain: ChainBsc, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d", Decimals: 18, Priority: 90, Enabled: true},
+		{Chain: ChainBsc, Symbol: TokenBNB, Name: "BNB", Contract: "", Decimals: 18, IsNative: true, Priority: 80, Enabled: true},
 
 		// ETH
-		{Chain: ChainEth, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xdac17f958d2ee523a2206206994597c13d831ec7", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "主网原生", Priority: 100, Enabled: true},
-		{Chain: ChainEth, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Priority: 90, Enabled: true},
-		{Chain: ChainEth, Symbol: TokenETH, Name: "Ethereum", Contract: "", Decimals: 18, IsNative: true, Icon: "fa-brands fa-ethereum", Priority: 80, Enabled: true},
+		{Chain: ChainEth, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xdac17f958d2ee523a2206206994597c13d831ec7", Decimals: 6, Priority: 100, Enabled: true},
+		{Chain: ChainEth, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", Decimals: 6, Priority: 90, Enabled: true},
+		{Chain: ChainEth, Symbol: TokenETH, Name: "Ethereum", Contract: "", Decimals: 18, IsNative: true, Priority: 80, Enabled: true},
 
 		// POLYGON
-		{Chain: ChainPolygon, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "低费率", Priority: 100, Enabled: true},
-		{Chain: ChainPolygon, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Priority: 90, Enabled: true},
+		{Chain: ChainPolygon, Symbol: TokenUSDT, Name: "Tether USD", Contract: "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", Decimals: 6, Priority: 100, Enabled: true},
+		{Chain: ChainPolygon, Symbol: TokenUSDC, Name: "USD Coin", Contract: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", Decimals: 6, Priority: 90, Enabled: true},
 
 		// SOLANA
-		{Chain: ChainSolana, Symbol: TokenUSDT, Name: "Tether USD", Contract: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "极速", Priority: 100, Enabled: true},
-		{Chain: ChainSolana, Symbol: TokenUSDC, Name: "USD Coin", Contract: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", Decimals: 6, Icon: "fa-solid fa-circle-dollar-to-slot", Badge: "极速", Priority: 95, Enabled: true},
-		{Chain: ChainSolana, Symbol: "SOL", Name: "Solana", Contract: "", Decimals: 9, IsNative: true, Icon: "fa-solid fa-sun", Priority: 80, Enabled: true},
+		{Chain: ChainSolana, Symbol: TokenUSDT, Name: "Tether USD", Contract: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", Decimals: 6, Priority: 100, Enabled: true},
+		{Chain: ChainSolana, Symbol: TokenUSDC, Name: "USD Coin", Contract: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", Decimals: 6, Priority: 95, Enabled: true},
+		{Chain: ChainSolana, Symbol: "SOL", Name: "Solana", Contract: "", Decimals: 9, IsNative: true, Priority: 80, Enabled: true},
 	}
-}
-
-// GetTokenDisplayMeta returns the default presentation metadata for a token.
-func GetTokenDisplayMeta(symbol Token) CryptoTokenOption {
-	meta := map[string]CryptoTokenOption{
-		"USDT": {Symbol: "USDT", Name: "Tether USD", Icon: "fa-solid fa-circle-dollar-to-slot"},
-		"USDC": {Symbol: "USDC", Name: "USD Coin", Icon: "fa-solid fa-circle-dollar-to-slot"},
-		"BTC":  {Symbol: "BTC", Name: "Bitcoin", Icon: "fa-brands fa-bitcoin"},
-		"ETH":  {Symbol: "ETH", Name: "Ethereum", Icon: "fa-brands fa-ethereum"},
-		"BNB":  {Symbol: "BNB", Name: "BNB", Icon: "fa-solid fa-coins"},
-		"SOL":  {Symbol: "SOL", Name: "Solana", Icon: "fa-solid fa-sun"},
-	}
-	return meta[string(symbol)]
 }

@@ -283,10 +283,13 @@ func (h *IntentHandler) GetIntentStatus(c *gin.Context) {
 }
 
 type SimulateReq struct {
-	TargetAddress string          `json:"targetAddress" binding:"required"`
-	Amount        decimal.Decimal `json:"amount" binding:"required"`
+	OrderID       string          `json:"orderId"`
+	TargetAddress string          `json:"targetAddress"`
+	Amount        decimal.Decimal `json:"amount"`
 	Chain         string          `json:"chain"`
 	Token         string          `json:"token"`
+	TxHash        string          `json:"txHash"`
+	BlockNumber   uint64          `json:"blockNumber"`
 }
 
 // SimulateOnChainTransfer handles POST /api/v1/watcher/intents/simulate
@@ -305,23 +308,60 @@ func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
 		return
 	}
 
+	// 如果传入了 orderId，则优先尝试自动补全 targetAddress, amount, chain, token
+	orderID := strings.TrimSpace(req.OrderID)
+	if orderID != "" && h.db != nil {
+		var intent model.PaymentIntent
+		if err := h.db.Where("order_id = ? OR id = ?", orderID, orderID).First(&intent).Error; err == nil {
+			if strings.TrimSpace(req.TargetAddress) == "" {
+				req.TargetAddress = intent.TargetAddress
+			}
+			if req.Amount.IsZero() {
+				req.Amount = intent.ExpectedAmount
+			}
+			if strings.TrimSpace(req.Chain) == "" {
+				req.Chain = string(intent.Chain)
+			}
+			if strings.TrimSpace(req.Token) == "" {
+				req.Token = string(intent.Token)
+			}
+		} else if strings.TrimSpace(req.TargetAddress) == "" {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": fmt.Sprintf("Order '%s' not found and targetAddress is empty", orderID)})
+			return
+		}
+	}
+
+	if strings.TrimSpace(req.TargetAddress) == "" || req.Amount.LessThanOrEqual(decimal.Zero) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "targetAddress and positive amount are required (or a valid orderId)"})
+		return
+	}
+
 	chain := model.NormalizeChain(req.Chain)
 	token := model.Token(strings.ToUpper(strings.TrimSpace(req.Token)))
 	if token == "" {
 		token = model.TokenUSDT
 	}
 
-	txHash := fmt.Sprintf("mock_tx_%x%d", rand.Uint64(), time.Now().UnixNano())
-	latestBlock := h.scannerMgr.GetLatestBlock(chain)
-	if latestBlock == 0 {
-		latestBlock = 10000000
+	txHash := strings.TrimSpace(req.TxHash)
+	if txHash == "" {
+		txHash = fmt.Sprintf("mock_tx_%x%d", rand.Uint64(), time.Now().UnixNano())
 	}
-	// 模拟流水不经过真实节点，因此不能等待链上新区块推进确认数。
-	// 让模拟交易落在“已满足确认数”的历史区块上，确保本地测试可以完整走通
-	// WATCHING -> CONFIRMING/PAID 以及 Webhook 派发链路。
-	requiredConfirmations := h.cfg.GetRequiredConfirmations(chain)
-	if requiredConfirmations > 0 && latestBlock >= requiredConfirmations {
-		latestBlock -= requiredConfirmations - 1
+
+	latestBlock := req.BlockNumber
+	if latestBlock == 0 {
+		if h.scannerMgr != nil {
+			latestBlock = h.scannerMgr.GetLatestBlock(chain)
+		}
+		if latestBlock == 0 {
+			latestBlock = 10000000
+		}
+		// 模拟流水不经过真实节点，因此不能等待链上新区块推进确认数。
+		// 让模拟交易落在“已满足确认数”的历史区块上，确保本地测试可以完整走通
+		// WATCHING -> CONFIRMING/PAID 以及 Webhook 派发链路。
+		requiredConfirmations := h.cfg.GetRequiredConfirmations(chain)
+		if requiredConfirmations > 0 && latestBlock >= requiredConfirmations {
+			latestBlock -= requiredConfirmations - 1
+		}
 	}
 
 	transfer := model.ChainTransfer{
@@ -347,10 +387,12 @@ func (h *IntentHandler) SimulateOnChainTransfer(c *gin.Context) {
 			"code":    200,
 			"message": "Simulated transfer broadcasted to scanner pipeline",
 			"data": gin.H{
-				"txHash": txHash,
-				"chain":  chain,
-				"amount": req.Amount,
-				"token":  token,
+				"txHash":        txHash,
+				"chain":         chain,
+				"targetAddress": transfer.TargetAddress,
+				"amount":        req.Amount,
+				"token":         token,
+				"blockNumber":   latestBlock,
 			},
 		})
 	default:

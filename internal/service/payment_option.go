@@ -125,16 +125,11 @@ func buildPaymentOptions(availableChains map[string]bool, dbTokens []model.Chain
 		}
 
 		symbol := string(token.Symbol)
-		chainMeta := model.GetChainDisplayMeta(token.Chain)
-		chainName, chainBadge := chainMeta.Name, chainMeta.Badge
-		if chainName == "" {
-			chainName = string(token.Chain)
-		}
-		if token.Badge != "" {
-			chainBadge = token.Badge
-		}
 		options.Chains[symbol] = append(options.Chains[symbol], model.CryptoChainOption{
-			Chain: token.Chain, Name: chainName, Badge: chainBadge, Decimals: token.Decimals,
+			Chain:    token.Chain,
+			Contract: token.Contract,
+			Decimals: token.Decimals,
+			IsNative: token.IsNative,
 		})
 
 		if !seenTokens[symbol] {
@@ -143,22 +138,9 @@ func buildPaymentOptions(availableChains map[string]bool, dbTokens []model.Chain
 		}
 	}
 
-	// Each token must expose chains in the same canonical order. The database
-	// order is token-oriented (priority/id), so it cannot be used directly here.
+	// 统一各代币下的公链顺序（按链标识名称字母排序，保证全局一致且确定）
 	for symbol := range options.Chains {
 		sort.SliceStable(options.Chains[symbol], func(i, j int) bool {
-			left := model.GetChainDisplayMeta(options.Chains[symbol][i].Chain)
-			right := model.GetChainDisplayMeta(options.Chains[symbol][j].Chain)
-			leftOrder, rightOrder := left.Order, right.Order
-			if leftOrder == 0 {
-				leftOrder = int(^uint(0) >> 1)
-			}
-			if rightOrder == 0 {
-				rightOrder = int(^uint(0) >> 1)
-			}
-			if leftOrder != rightOrder {
-				return leftOrder < rightOrder
-			}
 			return options.Chains[symbol][i].Chain < options.Chains[symbol][j].Chain
 		})
 	}
@@ -168,21 +150,14 @@ func buildPaymentOptions(availableChains map[string]bool, dbTokens []model.Chain
 }
 
 func paymentTokenOption(token model.ChainToken) model.CryptoTokenOption {
-	option := model.GetTokenDisplayMeta(token.Symbol)
-	option.Symbol = string(token.Symbol)
-	if token.Name != "" {
-		option.Name = token.Name
+	name := token.Name
+	if name == "" {
+		name = string(token.Symbol)
 	}
-	if token.Icon != "" {
-		option.Icon = token.Icon
+	return model.CryptoTokenOption{
+		Symbol: string(token.Symbol),
+		Name:   name,
 	}
-	if option.Name == "" {
-		option.Name = string(token.Symbol)
-	}
-	if option.Icon == "" {
-		option.Icon = "fa-solid fa-coins"
-	}
-	return option
 }
 
 func setDefaultPaymentOption(options *model.CryptoPaymentOptions) {
