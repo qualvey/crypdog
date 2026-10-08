@@ -64,9 +64,9 @@ type EvmScanner struct {
 	cfg              *config.ChainNodeConfig
 	// 运行状态
 	latestBlock atomic.Uint64 // 当前全网高度
-	lastScanOK  atomic.Int64  // Unix time of the last successful scan cycle
-	scannedSlot uint64        // 当前已确认落库的扫描进度 (单协程内维护无需 atomic)
-	curBatch    uint64        // 动态 batch 大小 (支持遇到 10000 limit 时自适应下调)
+	health      *HealthTracker
+	scannedSlot uint64 // 当前已确认落库的扫描进度 (单协程内维护无需 atomic)
+	curBatch    uint64 // 动态 batch 大小 (支持遇到 10000 limit 时自适应下调)
 	// 新增：本链支持的代币集合 (Key 为小写合约地址，原生币可约定为空字符串)
 	tokensMu sync.RWMutex
 	tokens   map[string]model.TokenSpec // 或使用自定义的 TokenMeta
@@ -93,6 +93,11 @@ func NewEvmScanner(Chain model.Chain, db *gorm.DB, cfg *config.ChainNodeConfig) 
 		tokens:         make(map[string]model.TokenSpec),
 		blockTimeCache: make(map[uint64]int64),
 	}
+	interval := 3 * time.Second
+	if cfg.ScanIntervalSec > 0 {
+		interval = time.Duration(cfg.ScanIntervalSec) * time.Second
+	}
+	scanner.health = NewHealthTracker(Chain, interval)
 	chainkey := strings.ToUpper(string(Chain))
 	if defaultTokens, ok := knownTokens[chainkey]; ok {
 		for contract, meta := range defaultTokens {
@@ -124,15 +129,11 @@ func (s *EvmScanner) GetLatestBlock() uint64 {
 }
 
 func (s *EvmScanner) IsHealthy() bool {
-	last := s.lastScanOK.Load()
-	if last == 0 {
-		return false
-	}
-	interval := 3 * time.Second
-	if s.cfg != nil && s.cfg.ScanIntervalSec > 0 {
-		interval = time.Duration(s.cfg.ScanIntervalSec) * time.Second
-	}
-	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
+	return s.health.IsHealthy()
+}
+
+func (s *EvmScanner) HealthStatus() HealthStatus {
+	return s.health.Snapshot(s.GetLatestBlock())
 }
 func (s *EvmScanner) SupportedTokens() []model.TokenSpec {
 	s.tokensMu.RLock()
@@ -191,6 +192,7 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 	// 1. 初始化游标：必须成功才能开启事件循环；网络抖动时做指数退避重试
 	for {
 		if err := e.initCursor(ctx); err != nil {
+			e.health.MarkFailure(err)
 			logger.Error("scanner cursor initialization failed; retrying", "chain", e.Chain(), "error", err)
 			select {
 			case <-ctx.Done():
@@ -204,6 +206,7 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 	// 3. 立即执行首次扫描并快速追平历史落后块
 	for {
 		if err := e.scanNextBlocks(ctx, transferChan); err != nil {
+			e.health.MarkFailure(err)
 			logger.Error("initial block scan failed", "chain", e.Chain(), "error", err)
 			break
 		}
@@ -225,6 +228,7 @@ func (e *EvmScanner) Start(ctx context.Context, transferChan chan<- model.ChainT
 			// 周期性触发扫块；若滞后则快速连续追赶
 			for {
 				if err := e.scanNextBlocks(ctx, transferChan); err != nil {
+					e.health.MarkFailure(err)
 					logger.Error("block scan failed", "chain", e.Chain(), "error", err)
 					break
 				}
@@ -311,7 +315,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 	safeBlock := latestOnChain - blockDelay
 	// 还没有新出的安全块，等待下一轮
 	if safeBlock <= e.lastScannedBlock {
-		e.lastScanOK.Store(time.Now().Unix())
+		e.health.MarkSuccess()
 		return nil
 	}
 	fromBlock := e.lastScannedBlock + 1
@@ -328,7 +332,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 		if err := e.commitProgress(ctx, toBlock); err != nil {
 			return err
 		}
-		e.lastScanOK.Store(time.Now().Unix())
+		e.health.MarkSuccess()
 		return nil
 	}
 	walletMap := make(map[string]bool, len(activeWallets))
@@ -428,7 +432,7 @@ func (e *EvmScanner) scanNextBlocks(ctx context.Context, transferChan chan<- mod
 	if err := e.commitProgress(ctx, toBlock); err != nil {
 		return err
 	}
-	e.lastScanOK.Store(time.Now().Unix())
+	e.health.MarkSuccess()
 	return nil
 }
 

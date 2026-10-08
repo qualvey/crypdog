@@ -33,7 +33,7 @@ type SolanaScanner struct {
 	cfg         *config.ChainNodeConfig // 统一配置 (批次大小、扫描间隔、重试次数等)
 	client      *http.Client            // Solana 专用 RPC Client (或标准的 *http.Client)
 	latestBlock atomic.Uint64           // 保证并发安全
-	lastScanOK  atomic.Int64            // Unix time of the last successful scan cycle
+	health      *HealthTracker
 	// 2. 接口实现所需状态 (实现 Scanner.GetLatestBlock())
 	latestSlot atomic.Uint64 // 记录当前全网最新 Slot 高度
 	rpcURL     string
@@ -64,6 +64,11 @@ func NewSolanaScanner(db *gorm.DB, cfg *config.ChainNodeConfig) (Scanner, error)
 		tokens:         make(map[string]model.TokenSpec),
 		tokenAccounts:  make(map[string][]string),
 	}
+	interval := 3 * time.Second
+	if cfg.ScanIntervalSec > 0 {
+		interval = time.Duration(cfg.ScanIntervalSec) * time.Second
+	}
+	scanner.health = NewHealthTracker(model.ChainSolana, interval)
 	for _, spec := range DefaultSolanaTokens {
 		scanner.tokens[spec.Identifier] = spec
 	}
@@ -105,15 +110,11 @@ func (s *SolanaScanner) GetLatestBlock() uint64 {
 }
 
 func (s *SolanaScanner) IsHealthy() bool {
-	last := s.lastScanOK.Load()
-	if last == 0 {
-		return false
-	}
-	interval := 3 * time.Second
-	if s.cfg != nil && s.cfg.ScanIntervalSec > 0 {
-		interval = time.Duration(s.cfg.ScanIntervalSec) * time.Second
-	}
-	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
+	return s.health.IsHealthy()
+}
+
+func (s *SolanaScanner) HealthStatus() HealthStatus {
+	return s.health.Snapshot(s.GetLatestBlock())
 }
 
 // 最佳工程实践：对于这种 I/O 密集型轮询任务，通常更推荐显式延时（time.Sleep 或每次执行完后 Reset(timer)），
@@ -143,9 +144,10 @@ func (s *SolanaScanner) Start(ctx context.Context, transferChan chan<- model.Cha
 func (s *SolanaScanner) scanActiveAddresses(ctx context.Context, transferChan chan<- model.ChainTransfer) {
 	// 无论是否有活跃监听地址，每个扫描周期始终必须刷新链上最新高度，防止无 WATCHING 订单时 CONFIRMING 订单确认数检测卡死
 	if err := s.refreshLatestSlot(ctx); err != nil {
+		s.health.MarkFailure(err)
 		return
 	}
-	s.lastScanOK.Store(time.Now().Unix())
+	s.health.MarkSuccess()
 
 	addresses := s.getActiveTargetAddresses()
 	if len(addresses) == 0 {

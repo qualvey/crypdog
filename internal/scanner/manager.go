@@ -26,12 +26,6 @@ type TxVerifier interface {
 	VerifyTransaction(ctx context.Context, txHash string, blockNumber uint64) (bool, error)
 }
 
-// ScannerHealth is implemented by built-in scanners to expose recent RPC
-// health without changing the base Scanner interface.
-type ScannerHealth interface {
-	IsHealthy() bool
-}
-
 type ScannerFactory func(chain model.Chain, db *gorm.DB, chainCfg config.ChainNodeConfig) (Scanner, error)
 
 type Simulator interface {
@@ -152,6 +146,22 @@ func (m *Manager) GetScannersStatus() map[string]uint64 {
 		status[name] = s.GetLatestBlock()
 	}
 	return status
+}
+
+// GetScannerHealth returns detailed health for a scanner when it implements
+// the optional health interface. Older external scanners remain supported.
+func (m *Manager) GetScannerHealth(chain string) (HealthStatus, bool) {
+	m.mu.RLock()
+	s, ok := m.scanners[chain]
+	m.mu.RUnlock()
+	if !ok {
+		return HealthStatus{}, false
+	}
+	health, ok := s.(ScannerHealth)
+	if !ok {
+		return HealthStatus{}, false
+	}
+	return health.HealthStatus(), true
 }
 
 // GetAvailableChains returns chains whose scanner has recently completed a

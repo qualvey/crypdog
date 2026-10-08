@@ -56,10 +56,25 @@ func ReadyHandler(h *Handler) gin.HandlerFunc {
 				if healthyChains[chain] {
 					status = "UP"
 				}
-				scannersComponent[chain] = gin.H{
+				component := gin.H{
 					"status":       status,
 					"latest_block": latestBlock,
 				}
+				if detail, ok := h.scannerMgr.GetScannerHealth(chain); ok {
+					if detail.LastSuccessAt != nil {
+						component["last_success_at"] = detail.LastSuccessAt
+					}
+					if detail.LastFailureAt != nil {
+						component["last_failure_at"] = detail.LastFailureAt
+					}
+					if detail.LastError != "" {
+						component["last_error"] = detail.LastError
+					}
+					if detail.ConsecutiveFailures > 0 {
+						component["consecutive_failures"] = detail.ConsecutiveFailures
+					}
+				}
+				scannersComponent[chain] = component
 			}
 			// A database-only ready state can accept orders that nobody scans.
 			// Require at least one healthy scanner when scanners are configured.
