@@ -18,6 +18,26 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestTronScanner_UpdateLatestBlockUsesFullNodeAPI(t *testing.T) {
+	var gotMethod, gotPath string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"block_header":{"raw_data":{"number":70000001,"timestamp":1700000000000}}}`))
+	}))
+	defer mockServer.Close()
+
+	sc, err := NewTronScanner(nil, &config.ChainNodeConfig{RPCURL: mockServer.URL})
+	require.NoError(t, err)
+	tronScanner := sc.(*TronScanner)
+
+	require.NoError(t, tronScanner.updateLatestBlock(context.Background()))
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/wallet/getnowblock", gotPath)
+	assert.Equal(t, uint64(70000001), tronScanner.latestBlock.Load())
+}
+
 func TestTronScanner_RejectFakeUSDTToken(t *testing.T) {
 	// 构造 Mock TronGrid API
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -27,7 +27,7 @@ type TronScanner struct {
 	db             *gorm.DB
 	Cfg            config.ChainNodeConfig
 	latestBlock    atomic.Uint64
-	lastScanOK     atomic.Int64
+	health         *HealthTracker
 	client         *http.Client
 	tokensMu       sync.RWMutex
 	tokens         map[string]model.TokenSpec
@@ -105,6 +105,11 @@ func NewTronScanner(db *gorm.DB, nodeCfg *config.ChainNodeConfig) (Scanner, erro
 		tokens:         make(map[string]model.TokenSpec),
 		lastTimestamps: make(map[string]int64),
 	}
+	interval := 3 * time.Second
+	if nodeCfg.ScanIntervalSec > 0 {
+		interval = time.Duration(nodeCfg.ScanIntervalSec) * time.Second
+	}
+	scanner.health = NewHealthTracker(model.ChainTron, interval)
 	// 1. 装载 TRX 原生代币
 	scanner.tokens["TRX"] = model.TokenSpec{
 		Symbol:     "TRX",
@@ -142,15 +147,11 @@ func (t *TronScanner) GetLatestBlock() uint64 {
 }
 
 func (t *TronScanner) IsHealthy() bool {
-	last := t.lastScanOK.Load()
-	if last == 0 {
-		return false
-	}
-	interval := time.Duration(t.Cfg.ScanIntervalSec) * time.Second
-	if interval <= 0 {
-		interval = 3 * time.Second
-	}
-	return time.Since(time.Unix(last, 0)) <= maxScannerHealthAge(interval)
+	return t.health.IsHealthy()
+}
+
+func (t *TronScanner) HealthStatus() HealthStatus {
+	return t.health.Snapshot(t.GetLatestBlock())
 }
 
 func (t *TronScanner) setLatestBlock(blk uint64) {
@@ -192,18 +193,23 @@ func (t *TronScanner) Start(ctx context.Context, transferChan chan<- model.Chain
 func (t *TronScanner) scanOnce(ctx context.Context, transferChan chan<- model.ChainTransfer) {
 	if err := t.updateLatestBlock(ctx); err != nil {
 		metrics.RecordScanError(string(model.ChainTron), "tron")
+		t.health.MarkFailure(err)
 		return
 	}
 	t.scanActiveTronAddresses(ctx, transferChan)
-	t.lastScanOK.Store(time.Now().Unix())
+	t.health.MarkSuccess()
 }
 
 func (t *TronScanner) updateLatestBlock(ctx context.Context) error {
-	url := fmt.Sprintf("%s/v1/blocks/latest", t.Cfg.RPCURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// TronGrid's indexed v1 API does not expose /v1/blocks/latest. Use the
+	// stable full-node API instead; getnowblock returns the same block_header
+	// shape needed by the scanner and is also supported by api.trongrid.io.
+	endpoint := fmt.Sprintf("%s/wallet/getnowblock", strings.TrimRight(strings.TrimSpace(t.Cfg.RPCURL), "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{}`))
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	if t.Cfg.APIKey != "" {
 		req.Header.Set("TRON-PRO-API-KEY", t.Cfg.APIKey)
 	}
@@ -215,11 +221,24 @@ func (t *TronScanner) updateLatestBlock(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("tron latest block API error: status %d", resp.StatusCode)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		bodySummary := strings.TrimSpace(string(body))
+		if bodySummary == "" && readErr != nil {
+			bodySummary = fmt.Sprintf("<unable to read response body: %v>", readErr)
+		}
+		if bodySummary == "" {
+			bodySummary = "<empty response body>"
+		}
+		return fmt.Errorf("tron latest block API error: method=POST endpoint=%s status=%d status_text=%q content_type=%q body=%q", endpoint, resp.StatusCode, http.StatusText(resp.StatusCode), resp.Header.Get("Content-Type"), bodySummary)
 	}
-	defer resp.Body.Close()
 
 	var tronResp struct {
+		BlockHeader struct {
+			RawData struct {
+				Number    int64 `json:"number"`
+				Timestamp int64 `json:"timestamp"`
+			} `json:"raw_data"`
+		} `json:"block_header"`
 		Data []struct {
 			BlockHeader struct {
 				RawData struct {
@@ -232,10 +251,12 @@ func (t *TronScanner) updateLatestBlock(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&tronResp); err != nil {
 		return fmt.Errorf("解析区块 JSON 失败: %w", err)
 	}
-	if len(tronResp.Data) == 0 {
-		return fmt.Errorf("RPC 返回的区块列表为空")
+	rawNum := tronResp.BlockHeader.RawData.Number
+	if rawNum <= 0 && len(tronResp.Data) > 0 {
+		// Keep compatibility with indexed block responses should a compatible
+		// TronGrid provider be configured in the future.
+		rawNum = tronResp.Data[0].BlockHeader.RawData.Number
 	}
-	rawNum := tronResp.Data[0].BlockHeader.RawData.Number
 	if rawNum <= 0 {
 		return fmt.Errorf("非法区块高度: %d", rawNum)
 	}
@@ -287,23 +308,23 @@ func (t *TronScanner) scanSingleAddress(ctx context.Context, baseURL, addr strin
 
 	// 若尚未缓存水位线，尝试从 DB 恢复
 	if lastTs == 0 && t.db != nil {
-		var progress model.ScanProgress
+		var progress []model.ScanProgress
 		if err := t.db.WithContext(ctx).
 			Where("chain = ? AND address = ?", model.ChainTron, addr).
-			First(&progress).Error; err == nil && progress.LastScannedBlock > 0 {
-			lastTs = int64(progress.LastScannedBlock)
-			fingerprint = progress.LastSignature
+			Limit(1).Find(&progress).Error; err == nil && len(progress) > 0 && progress[0].LastScannedBlock > 0 {
+			lastTs = int64(progress[0].LastScannedBlock)
+			fingerprint = progress[0].LastSignature
 			t.tsMu.Lock()
 			t.lastTimestamps[addr] = lastTs
 			t.tsMu.Unlock()
 		}
 	}
 	if lastTs == 0 && t.db != nil {
-		var lastTransfer model.ChainTransfer
+		var lastTransfers []model.ChainTransfer
 		if err := t.db.WithContext(ctx).
 			Where("chain = ? AND target_address = ?", model.ChainTron, addr).
-			Order("block_timestamp DESC").First(&lastTransfer).Error; err == nil && lastTransfer.BlockTimestamp > 0 {
-			lastTs = lastTransfer.BlockTimestamp * 1000 // 转为毫秒
+			Order("block_timestamp DESC").Limit(1).Find(&lastTransfers).Error; err == nil && len(lastTransfers) > 0 && lastTransfers[0].BlockTimestamp > 0 {
+			lastTs = lastTransfers[0].BlockTimestamp * 1000 // 转为毫秒
 			t.tsMu.Lock()
 			t.lastTimestamps[addr] = lastTs
 			t.tsMu.Unlock()
